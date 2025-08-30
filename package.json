@@ -1,0 +1,25 @@
+{
+  "name": "livebs",
+  "description": "Live BS",
+  "version": "0.0.1",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "build": "esbuild --bundle src/index.js --sourcemap --outfile=public/index.js",
+    "start": "npm run build -- --serve=8333 --servedir=public",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "threejs",
+    "webgl"
+  ],
+  "author": "Oleg Mihailik",
+  "license": "MIT",
+  "dependencies": {
+    "bski": "^0.9.16",
+    "esbuild": "^0.25.9",
+    "three": "^0.179.1"
+  }
+}
