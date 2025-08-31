@@ -13297,6 +13297,148 @@
       return this;
     }
   };
+  var PointsMaterial = class extends Material {
+    /**
+     * Constructs a new points material.
+     *
+     * @param {Object} [parameters] - An object with one or more properties
+     * defining the material's appearance. Any property of the material
+     * (including any property from inherited materials) can be passed
+     * in here. Color values can be passed any type of value accepted
+     * by {@link Color#set}.
+     */
+    constructor(parameters) {
+      super();
+      this.isPointsMaterial = true;
+      this.type = "PointsMaterial";
+      this.color = new Color(16777215);
+      this.map = null;
+      this.alphaMap = null;
+      this.size = 1;
+      this.sizeAttenuation = true;
+      this.fog = true;
+      this.setValues(parameters);
+    }
+    copy(source) {
+      super.copy(source);
+      this.color.copy(source.color);
+      this.map = source.map;
+      this.alphaMap = source.alphaMap;
+      this.size = source.size;
+      this.sizeAttenuation = source.sizeAttenuation;
+      this.fog = source.fog;
+      return this;
+    }
+  };
+  var _inverseMatrix = /* @__PURE__ */ new Matrix4();
+  var _ray = /* @__PURE__ */ new Ray();
+  var _sphere = /* @__PURE__ */ new Sphere();
+  var _position$2 = /* @__PURE__ */ new Vector3();
+  var Points = class extends Object3D {
+    /**
+     * Constructs a new point cloud.
+     *
+     * @param {BufferGeometry} [geometry] - The points geometry.
+     * @param {Material|Array<Material>} [material] - The points material.
+     */
+    constructor(geometry = new BufferGeometry(), material = new PointsMaterial()) {
+      super();
+      this.isPoints = true;
+      this.type = "Points";
+      this.geometry = geometry;
+      this.material = material;
+      this.morphTargetDictionary = void 0;
+      this.morphTargetInfluences = void 0;
+      this.updateMorphTargets();
+    }
+    copy(source, recursive) {
+      super.copy(source, recursive);
+      this.material = Array.isArray(source.material) ? source.material.slice() : source.material;
+      this.geometry = source.geometry;
+      return this;
+    }
+    /**
+     * Computes intersection points between a casted ray and this point cloud.
+     *
+     * @param {Raycaster} raycaster - The raycaster.
+     * @param {Array<Object>} intersects - The target array that holds the intersection points.
+     */
+    raycast(raycaster, intersects) {
+      const geometry = this.geometry;
+      const matrixWorld = this.matrixWorld;
+      const threshold = raycaster.params.Points.threshold;
+      const drawRange = geometry.drawRange;
+      if (geometry.boundingSphere === null) geometry.computeBoundingSphere();
+      _sphere.copy(geometry.boundingSphere);
+      _sphere.applyMatrix4(matrixWorld);
+      _sphere.radius += threshold;
+      if (raycaster.ray.intersectsSphere(_sphere) === false) return;
+      _inverseMatrix.copy(matrixWorld).invert();
+      _ray.copy(raycaster.ray).applyMatrix4(_inverseMatrix);
+      const localThreshold = threshold / ((this.scale.x + this.scale.y + this.scale.z) / 3);
+      const localThresholdSq = localThreshold * localThreshold;
+      const index = geometry.index;
+      const attributes = geometry.attributes;
+      const positionAttribute = attributes.position;
+      if (index !== null) {
+        const start = Math.max(0, drawRange.start);
+        const end = Math.min(index.count, drawRange.start + drawRange.count);
+        for (let i = start, il = end; i < il; i++) {
+          const a = index.getX(i);
+          _position$2.fromBufferAttribute(positionAttribute, a);
+          testPoint(_position$2, a, localThresholdSq, matrixWorld, raycaster, intersects, this);
+        }
+      } else {
+        const start = Math.max(0, drawRange.start);
+        const end = Math.min(positionAttribute.count, drawRange.start + drawRange.count);
+        for (let i = start, l = end; i < l; i++) {
+          _position$2.fromBufferAttribute(positionAttribute, i);
+          testPoint(_position$2, i, localThresholdSq, matrixWorld, raycaster, intersects, this);
+        }
+      }
+    }
+    /**
+     * Sets the values of {@link Points#morphTargetDictionary} and {@link Points#morphTargetInfluences}
+     * to make sure existing morph targets can influence this 3D object.
+     */
+    updateMorphTargets() {
+      const geometry = this.geometry;
+      const morphAttributes = geometry.morphAttributes;
+      const keys = Object.keys(morphAttributes);
+      if (keys.length > 0) {
+        const morphAttribute = morphAttributes[keys[0]];
+        if (morphAttribute !== void 0) {
+          this.morphTargetInfluences = [];
+          this.morphTargetDictionary = {};
+          for (let m = 0, ml = morphAttribute.length; m < ml; m++) {
+            const name = morphAttribute[m].name || String(m);
+            this.morphTargetInfluences.push(0);
+            this.morphTargetDictionary[name] = m;
+          }
+        }
+      }
+    }
+  };
+  function testPoint(point, index, localThresholdSq, matrixWorld, raycaster, intersects, object) {
+    const rayPointDistanceSq = _ray.distanceSqToPoint(point);
+    if (rayPointDistanceSq < localThresholdSq) {
+      const intersectPoint = new Vector3();
+      _ray.closestPointToPoint(point, intersectPoint);
+      intersectPoint.applyMatrix4(matrixWorld);
+      const distance = raycaster.ray.origin.distanceTo(intersectPoint);
+      if (distance < raycaster.near || distance > raycaster.far) return;
+      intersects.push({
+        distance,
+        distanceToRay: Math.sqrt(rayPointDistanceSq),
+        point: intersectPoint,
+        index,
+        face: null,
+        faceIndex: null,
+        barycoord: null,
+        object
+      });
+    }
+  }
   var DepthTexture = class extends Texture {
     /**
      * Constructs a new depth texture.
@@ -25517,7 +25659,7 @@ void main() {
   var _changeEvent = { type: "change" };
   var _startEvent = { type: "start" };
   var _endEvent = { type: "end" };
-  var _ray = new Ray();
+  var _ray2 = new Ray();
   var _plane = new Plane();
   var _TILT_LIMIT = Math.cos(70 * MathUtils.DEG2RAD);
   var _v = new Vector3();
@@ -25793,13 +25935,13 @@ void main() {
           if (this.screenSpacePanning) {
             this.target.set(0, 0, -1).transformDirection(this.object.matrix).multiplyScalar(newRadius).add(this.object.position);
           } else {
-            _ray.origin.copy(this.object.position);
-            _ray.direction.set(0, 0, -1).transformDirection(this.object.matrix);
-            if (Math.abs(this.object.up.dot(_ray.direction)) < _TILT_LIMIT) {
+            _ray2.origin.copy(this.object.position);
+            _ray2.direction.set(0, 0, -1).transformDirection(this.object.matrix);
+            if (Math.abs(this.object.up.dot(_ray2.direction)) < _TILT_LIMIT) {
               this.object.lookAt(this.target);
             } else {
               _plane.setFromNormalAndCoplanarPoint(this.object.up, this.target);
-              _ray.intersectPlane(_plane, this.target);
+              _ray2.intersectPlane(_plane, this.target);
             }
           }
         }
@@ -26353,37 +26495,984 @@ void main() {
     }
   }
 
-  // src/plans/plan-a.js
-  var PlanA = class {
-    constructor(scene2, renderer2) {
-      this.scene = scene2;
-      this.renderer = renderer2;
-      this._objects = [];
+  // src/plan-a/utils/gpu-texture.js
+  var GPUTexture = class {
+    constructor(gl) {
+      this.gl = gl;
+      this.capabilities = this.detectCapabilities();
     }
-    start() {
-      const geom = new THREE.BufferGeometry();
-      const count = 1e3;
-      const pos = new Float32Array(count * 3);
-      for (let i = 0; i < count; i++) {
-        pos[i * 3 + 0] = (Math.random() - 0.5) * 4;
-        pos[i * 3 + 1] = (Math.random() - 0.5) * 4;
-        pos[i * 3 + 2] = (Math.random() - 0.5) * 4;
+    /**
+     * Detect WebGL capabilities for texture formats and extensions
+     */
+    detectCapabilities() {
+      const gl = this.gl;
+      const capabilities = {
+        webgl2: !!gl.getParameter,
+        float_texture: !!gl.getExtension("EXT_color_buffer_float"),
+        float_blend: !!gl.getExtension("EXT_float_blend"),
+        max_texture_size: gl.getParameter(gl.MAX_TEXTURE_SIZE),
+        timer_query: gl.getExtension("EXT_disjoint_timer_query_webgl2")
+      };
+      if (capabilities.float_texture && capabilities.float_blend) {
+        capabilities.textureFormat = gl.RGBA32F;
+        capabilities.textureType = gl.FLOAT;
+        capabilities.precision = "high";
+      } else {
+        capabilities.textureFormat = gl.RGBA;
+        capabilities.textureType = gl.UNSIGNED_BYTE;
+        capabilities.precision = "medium";
       }
-      geom.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-      const mat = new THREE.PointsMaterial({ color: 6737151, size: 0.02 });
-      const points = new THREE.Points(geom, mat);
-      this.scene.add(points);
-      this._objects.push(points);
+      return capabilities;
     }
-    stop() {
-      this._objects.forEach((o) => this.scene.remove(o));
-      this._objects = [];
+    /**
+     * Validate particle count against texture size limits
+     */
+    validateParticleCount(particleCount) {
+      const requiredSize = Math.ceil(Math.sqrt(particleCount));
+      if (requiredSize > this.capabilities.max_texture_size) {
+        throw new Error(`Particle count ${particleCount} requires texture size ${requiredSize}, but max is ${this.capabilities.max_texture_size}`);
+      }
+      return requiredSize;
     }
-    update() {
+    /**
+     * Calculate texture dimensions for given particle count
+     */
+    getTextureDimensions(particleCount) {
+      const size = Math.ceil(Math.sqrt(particleCount));
+      return { width: size, height: size };
+    }
+    /**
+     * Create a texture with specified format and dimensions
+     */
+    createTexture(width, height, format = null, type = null) {
+      const gl = this.gl;
+      const texture = gl.createTexture();
+      const actualFormat = format || this.capabilities.textureFormat;
+      const actualType = type || this.capabilities.textureType;
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        actualFormat,
+        width,
+        height,
+        0,
+        gl.RGBA,
+        actualType,
+        null
+      );
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+      return texture;
+    }
+    /**
+     * Create a framebuffer with attached texture
+     */
+    createFramebuffer(texture) {
+      const gl = this.gl;
+      const framebuffer = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+      gl.framebufferTexture2D(
+        gl.FRAMEBUFFER,
+        gl.COLOR_ATTACHMENT0,
+        gl.TEXTURE_2D,
+        texture,
+        0
+      );
+      const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+      if (status !== gl.FRAMEBUFFER_COMPLETE) {
+        gl.deleteFramebuffer(framebuffer);
+        throw new Error(`Framebuffer incomplete: ${this.getFramebufferStatusString(status)}`);
+      }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      return framebuffer;
+    }
+    /**
+     * Create ping-pong texture pair with framebuffers
+     */
+    createPingPongTextures(width, height) {
+      const texture1 = this.createTexture(width, height);
+      const texture2 = this.createTexture(width, height);
+      const fbo1 = this.createFramebuffer(texture1);
+      const fbo2 = this.createFramebuffer(texture2);
+      return {
+        textures: [texture1, texture2],
+        framebuffers: [fbo1, fbo2],
+        current: 0,
+        // Helper methods
+        getCurrentTexture() {
+          return this.textures[this.current];
+        },
+        getCurrentFramebuffer() {
+          return this.framebuffers[this.current];
+        },
+        getTargetTexture() {
+          return this.textures[1 - this.current];
+        },
+        getTargetFramebuffer() {
+          return this.framebuffers[1 - this.current];
+        },
+        swap() {
+          this.current = 1 - this.current;
+        }
+      };
+    }
+    /**
+     * Upload initial particle data to texture
+     */
+    uploadParticleData(texture, width, height, data) {
+      const gl = this.gl;
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texSubImage2D(
+        gl.TEXTURE_2D,
+        0,
+        0,
+        0,
+        width,
+        height,
+        gl.RGBA,
+        this.capabilities.textureType,
+        data
+      );
+      gl.bindTexture(gl.TEXTURE_2D, null);
+    }
+    /**
+     * Read texture data back to CPU (for testing/debugging)
+     */
+    readTextureData(texture, width, height) {
+      const gl = this.gl;
+      const framebuffer = this.createFramebuffer(texture);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+      const format = this.capabilities.precision === "high" ? Float32Array : Uint8Array;
+      const data = new format(width * height * 4);
+      gl.readPixels(0, 0, width, height, gl.RGBA, this.capabilities.textureType, data);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.deleteFramebuffer(framebuffer);
+      return data;
+    }
+    /**
+     * Convert framebuffer status to readable string
+     */
+    getFramebufferStatusString(status) {
+      const gl = this.gl;
+      switch (status) {
+        case gl.FRAMEBUFFER_INCOMPLETE_ATTACHMENT:
+          return "INCOMPLETE_ATTACHMENT";
+        case gl.FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT:
+          return "MISSING_ATTACHMENT";
+        case gl.FRAMEBUFFER_INCOMPLETE_DIMENSIONS:
+          return "INCOMPLETE_DIMENSIONS";
+        case gl.FRAMEBUFFER_UNSUPPORTED:
+          return "UNSUPPORTED";
+        default:
+          return `UNKNOWN(${status})`;
+      }
+    }
+    /**
+     * Estimate memory usage for given configuration
+     */
+    estimateMemoryUsage(particleCount) {
+      const bytesPerTexel = this.capabilities.precision === "high" ? 16 : 4;
+      const textureSize = Math.ceil(Math.sqrt(particleCount));
+      const texelsPerTexture = textureSize * textureSize;
+      const textureCount = 4;
+      return {
+        textureSizePx: textureSize,
+        totalTexels: texelsPerTexture * textureCount,
+        memoryMB: texelsPerTexture * textureCount * bytesPerTexel / (1024 * 1024),
+        precision: this.capabilities.precision
+      };
+    }
+    /**
+     * Clean up GPU resources
+     */
+    dispose() {
+    }
+  };
+  function generateParticlePositions(count, seed = 12345, worldBounds = { min: [-10, -10, -10], max: [10, 10, 10] }) {
+    const positions = new Float32Array(count * 4);
+    let rng = seed;
+    function random() {
+      rng = (rng * 1664525 + 1013904223) % 4294967296;
+      return rng / 4294967296;
+    }
+    for (let i = 0; i < count; i++) {
+      const base = i * 4;
+      positions[base + 0] = worldBounds.min[0] + random() * (worldBounds.max[0] - worldBounds.min[0]);
+      positions[base + 1] = worldBounds.min[1] + random() * (worldBounds.max[1] - worldBounds.min[1]);
+      positions[base + 2] = worldBounds.min[2] + random() * (worldBounds.max[2] - worldBounds.min[2]);
+      positions[base + 3] = 1;
+    }
+    return positions;
+  }
+  function generateParticleVelocities(count, seed = 54321) {
+    const velocities = new Float32Array(count * 4);
+    let rng = seed;
+    function random() {
+      rng = (rng * 1664525 + 1013904223) % 4294967296;
+      return rng / 4294967296;
+    }
+    for (let i = 0; i < count; i++) {
+      const base = i * 4;
+      velocities[base + 0] = (random() - 0.5) * 2;
+      velocities[base + 1] = (random() - 0.5) * 2;
+      velocities[base + 2] = (random() - 0.5) * 2;
+      velocities[base + 3] = 0;
+    }
+    return velocities;
+  }
+
+  // src/plan-a/bench.js
+  var PerformanceMonitor = class {
+    constructor() {
+      this.frameCount = 0;
+      this.startTime = performance.now();
+      this.frameTimes = [];
+      this.maxFrameHistory = 60;
+      this.frameStart = 0;
+      this.gpuTimerExt = null;
+      this.gpuQueries = [];
+      this.gpuTimings = [];
+    }
+    /**
+     * Initialize GPU timing if available
+     */
+    initGPUTiming(gl) {
+      this.gpuTimerExt = gl.getExtension("EXT_disjoint_timer_query_webgl2");
+      if (this.gpuTimerExt) {
+        console.log("GPU timing enabled");
+      }
+    }
+    /**
+     * Begin frame measurement
+     */
+    beginFrame() {
+      this.frameStart = performance.now();
+      if (this.gpuTimerExt) {
+        const query = this.gpuTimerExt.createQueryEXT();
+        this.gpuTimerExt.beginQueryEXT(this.gpuTimerExt.TIME_ELAPSED_EXT, query);
+        this.gpuQueries.push({ query, frameCount: this.frameCount });
+      }
+    }
+    /**
+     * End frame measurement
+     */
+    endFrame() {
+      const frameTime = performance.now() - this.frameStart;
+      this.frameTimes.push(frameTime);
+      if (this.frameTimes.length > this.maxFrameHistory) {
+        this.frameTimes.shift();
+      }
+      this.frameCount++;
+      if (this.gpuTimerExt) {
+        this.gpuTimerExt.endQueryEXT(this.gpuTimerExt.TIME_ELAPSED_EXT);
+      }
+      this.processGPUQueries();
+    }
+    /**
+     * Process completed GPU timing queries
+     */
+    processGPUQueries() {
+      if (!this.gpuTimerExt) return;
+      for (let i = this.gpuQueries.length - 1; i >= 0; i--) {
+        const queryInfo = this.gpuQueries[i];
+        if (this.gpuTimerExt.getQueryObjectEXT(queryInfo.query, this.gpuTimerExt.QUERY_RESULT_AVAILABLE_EXT)) {
+          const gpuTime = this.gpuTimerExt.getQueryObjectEXT(queryInfo.query, this.gpuTimerExt.QUERY_RESULT_EXT);
+          this.gpuTimings.push(gpuTime / 1e6);
+          if (this.gpuTimings.length > this.maxFrameHistory) {
+            this.gpuTimings.shift();
+          }
+          this.gpuTimerExt.deleteQueryEXT(queryInfo.query);
+          this.gpuQueries.splice(i, 1);
+        }
+      }
+    }
+    /**
+     * Get current performance metrics
+     */
+    getMetrics() {
+      if (this.frameTimes.length === 0) {
+        return {
+          fps: 0,
+          frameTime: 0,
+          frameTimeP95: 0,
+          frameTimeP99: 0,
+          gpuTimeMs: 0,
+          totalFrames: this.frameCount,
+          uptimeSeconds: 0
+        };
+      }
+      const avgFrameTime = this.frameTimes.reduce((a, b) => a + b, 0) / this.frameTimes.length;
+      const sortedFrameTimes = [...this.frameTimes].sort((a, b) => a - b);
+      const p95Index = Math.floor(sortedFrameTimes.length * 0.95);
+      const p99Index = Math.floor(sortedFrameTimes.length * 0.99);
+      const avgGpuTime = this.gpuTimings.length > 0 ? this.gpuTimings.reduce((a, b) => a + b, 0) / this.gpuTimings.length : 0;
+      return {
+        fps: 1e3 / avgFrameTime,
+        frameTime: avgFrameTime,
+        frameTimeP95: sortedFrameTimes[p95Index] || 0,
+        frameTimeP99: sortedFrameTimes[p99Index] || 0,
+        gpuTimeMs: avgGpuTime,
+        totalFrames: this.frameCount,
+        uptimeSeconds: (performance.now() - this.startTime) / 1e3
+      };
+    }
+    /**
+     * Estimate memory usage for given configuration
+     */
+    estimateMemoryUsage(particleCount, useFloat) {
+      const bytesPerTexel = useFloat ? 16 : 4;
+      const textureSize = Math.ceil(Math.sqrt(particleCount));
+      const texelsPerTexture = textureSize * textureSize;
+      const textureCount = 4;
+      return {
+        textureSizePx: textureSize,
+        totalTexels: texelsPerTexture * textureCount,
+        memoryMB: texelsPerTexture * textureCount * bytesPerTexel / (1024 * 1024)
+      };
+    }
+    /**
+     * Reset all measurements
+     */
+    reset() {
+      this.frameCount = 0;
+      this.startTime = performance.now();
+      this.frameTimes = [];
+      this.gpuTimings = [];
+      if (this.gpuTimerExt) {
+        this.gpuQueries.forEach((queryInfo) => {
+          this.gpuTimerExt.deleteQueryEXT(queryInfo.query);
+        });
+        this.gpuQueries = [];
+      }
+    }
+    /**
+     * Clean up resources
+     */
+    dispose() {
+      this.reset();
     }
   };
 
-  // src/plans/plan-c.js
+  // src/plan-a/index.js
+  var passVertSource = `#version 300 es
+precision highp float;
+
+in vec2 a_position;
+
+void main() {
+  gl_Position = vec4(a_position, 0.0, 1.0);
+}`;
+  var updateFragSource = `#version 300 es
+precision highp float;
+
+uniform sampler2D u_positions;
+uniform sampler2D u_velocities;
+uniform float u_time;
+uniform float u_dt;
+uniform int u_frameCount;
+uniform float u_samplingFraction;
+uniform vec2 u_texSize;
+uniform int u_particleCount;
+uniform vec3 u_worldMin;
+uniform vec3 u_worldMax;
+uniform uint u_seed;
+uniform int u_integrationMethod;
+uniform int u_wrapMode;
+
+const float MAX_VELOCITY = 100.0;
+const float MAX_FORCE = 1000.0;
+const int MAX_SAMPLES = 256;
+const float SOFTENING = 1e-6;
+const float DAMPING = 0.8;
+
+out vec4 fragColor;
+
+uint hash(uint x) {
+  x += (x << 10u);
+  x ^= (x >> 6u);
+  x += (x << 3u);
+  x ^= (x >> 11u);
+  x += (x << 15u);
+  return x;
+}
+
+float random(uint seed, uint index, uint frame) {
+  return float(hash(seed + index * 1009u + frame * 2039u)) / 4294967295.0;
+}
+
+vec2 indexToUV(int index) {
+  int x = index % int(u_texSize.x);
+  int y = index / int(u_texSize.x);
+  return (vec2(x, y) + 0.5) / u_texSize;
+}
+
+vec3 computePairForce(vec3 pos1, vec3 pos2, float mass1, float mass2) {
+  vec3 dir = pos2 - pos1;
+  float d2 = dot(dir, dir) + SOFTENING;
+  float force = mass1 * mass2 / d2;
+  return force * normalize(dir);
+}
+
+vec3 applyWrapBounds(vec3 position, vec3 minBounds, vec3 maxBounds) {
+  vec3 size = maxBounds - minBounds;
+  position = mod(position - minBounds, size) + minBounds;
+  return position;
+}
+
+vec3 applyClampBounds(vec3 position, inout vec3 velocity, vec3 minBounds, vec3 maxBounds) {
+  if (position.x < minBounds.x) { 
+    position.x = minBounds.x; 
+    velocity.x = abs(velocity.x) * DAMPING; 
+  }
+  if (position.x > maxBounds.x) { 
+    position.x = maxBounds.x; 
+    velocity.x = -abs(velocity.x) * DAMPING; 
+  }
+  if (position.y < minBounds.y) { 
+    position.y = minBounds.y; 
+    velocity.y = abs(velocity.y) * DAMPING; 
+  }
+  if (position.y > maxBounds.y) { 
+    position.y = maxBounds.y; 
+    velocity.y = -abs(velocity.y) * DAMPING; 
+  }
+  if (position.z < minBounds.z) { 
+    position.z = minBounds.z; 
+    velocity.z = abs(velocity.z) * DAMPING; 
+  }
+  if (position.z > maxBounds.z) { 
+    position.z = maxBounds.z; 
+    velocity.z = -abs(velocity.z) * DAMPING; 
+  }
+  return position;
+}
+
+void main() {
+  ivec2 coord = ivec2(gl_FragCoord.xy);
+  int myIndex = coord.y * int(u_texSize.x) + coord.x;
+  
+  if (myIndex >= u_particleCount) {
+    fragColor = vec4(0.0);
+    return;
+  }
+
+  vec2 myUV = (vec2(coord) + 0.5) / u_texSize;
+  vec4 posData = texture(u_positions, myUV);
+  vec4 velData = texture(u_velocities, myUV);
+  
+  vec3 myPos = posData.xyz;
+  float myMass = posData.w;
+  vec3 myVel = velData.xyz;
+  
+  vec3 totalForce = vec3(0.0);
+  int sampleCount = max(1, min(MAX_SAMPLES, int(float(u_particleCount) * u_samplingFraction)));
+  
+  for (int i = 0; i < MAX_SAMPLES; i++) {
+    if (i >= sampleCount) break;
+    
+    float r = random(u_seed, uint(myIndex), uint(u_frameCount + i));
+    int neighborIndex = int(r * float(u_particleCount));
+    
+    if (neighborIndex == myIndex) continue;
+    
+    vec2 neighborUV = indexToUV(neighborIndex);
+    vec4 neighborPosData = texture(u_positions, neighborUV);
+    vec3 neighborPos = neighborPosData.xyz;
+    float neighborMass = neighborPosData.w;
+    
+    totalForce += computePairForce(myPos, neighborPos, myMass, neighborMass);
+  }
+  
+  totalForce *= (1.0 / u_samplingFraction);
+  totalForce = clamp(totalForce, vec3(-MAX_FORCE), vec3(MAX_FORCE));
+  myVel = clamp(myVel, vec3(-MAX_VELOCITY), vec3(MAX_VELOCITY));
+  
+  vec3 newPos;
+  vec3 newVel = myVel;
+  
+  if (u_integrationMethod == 0) {
+    vec3 acceleration = totalForce / myMass;
+    newVel += acceleration * u_dt;
+    newPos = myPos + newVel * u_dt;
+  } else {
+    vec3 acceleration = totalForce / myMass;
+    newVel += acceleration * u_dt;
+    newPos = myPos + newVel * u_dt;
+  }
+  
+  if (u_wrapMode == 0) {
+    newPos = applyWrapBounds(newPos, u_worldMin, u_worldMax);
+  } else {
+    newPos = applyClampBounds(newPos, newVel, u_worldMin, u_worldMax);
+  }
+  
+  newVel = clamp(newVel, vec3(-MAX_VELOCITY), vec3(MAX_VELOCITY));
+  fragColor = vec4(newPos, myMass);
+}`;
+  var renderVertSource = `#version 300 es
+
+in float a_index;
+
+uniform sampler2D u_positions;
+uniform vec2 u_texSize;
+uniform mat4 u_projectionView;
+uniform float u_pointSize;
+
+out vec3 v_color;
+
+vec2 indexToUV(float index) {
+  float x = mod(index, u_texSize.x);
+  float y = floor(index / u_texSize.x);
+  return (vec2(x, y) + 0.5) / u_texSize;
+}
+
+void main() {
+  vec2 uv = indexToUV(a_index);
+  vec4 posData = texture(u_positions, uv);
+  vec3 worldPos = posData.xyz;
+  
+  gl_Position = u_projectionView * vec4(worldPos, 1.0);
+  gl_PointSize = u_pointSize;
+  
+  v_color = normalize(worldPos) * 0.5 + 0.5;
+}`;
+  var renderFragSource = `#version 300 es
+precision mediump float;
+
+in vec3 v_color;
+out vec4 fragColor;
+
+void main() {
+  vec2 coord = gl_PointCoord - vec2(0.5);
+  float dist = length(coord);
+  float alpha = 1.0 - smoothstep(0.3, 0.5, dist);
+  vec3 color = v_color * (0.8 + 0.2 * (1.0 - dist));
+  fragColor = vec4(color, alpha);
+}`;
+  var PlanA = class {
+    constructor(a, b, c) {
+      this.gl = null;
+      this.scene = null;
+      this.renderer = null;
+      this._objects = [];
+      if (a && a.getContext) {
+        this.gl = a;
+        this.options = b || {};
+        this.scene = c || null;
+      } else if (a && a.isWebGLRenderer) {
+        this.renderer = a;
+        this.scene = b || null;
+        this.gl = this.renderer.getContext();
+        this.options = c || {};
+      } else {
+        this.scene = a || null;
+        this.renderer = b || null;
+        this.gl = this.renderer && this.renderer.getContext && this.renderer.getContext() || null;
+        this.options = c || {};
+      }
+      this.options = {
+        particleCount: this.options.particleCount || 1e5,
+        samplingFraction: this.options.samplingFraction || 0.25,
+        dt: this.options.dt || 0.016,
+        integrationMethod: this.options.integrationMethod || "semi-implicit",
+        wrapMode: this.options.wrapMode || "wrap",
+        worldBounds: this.options.worldBounds || { min: [-10, -10, -10], max: [10, 10, 10] },
+        enableVelocityTexture: this.options.enableVelocityTexture !== false,
+        seed: this.options.seed || 12345,
+        pointSize: this.options.pointSize || 2
+      };
+      this.isInitialized = false;
+      this.frameCount = 0;
+      this.time = 0;
+      this.running = false;
+      this._objects = [];
+      this.gpuTexture = null;
+      this.positionTextures = null;
+      this.velocityTextures = null;
+      this.updateProgram = null;
+      this.renderProgram = null;
+      this.quadVAO = null;
+      this.particleVAO = null;
+      this.performanceMonitor = new PerformanceMonitor();
+      this.threeMesh = null;
+    }
+    async init() {
+      try {
+        console.log("Initializing Plan A...", this.options);
+        this.gpuTexture = new GPUTexture(this.gl);
+        console.log("GPU capabilities:", this.gpuTexture.capabilities);
+        this.gpuTexture.validateParticleCount(this.options.particleCount);
+        this.performanceMonitor.initGPUTiming(this.gl);
+        this.createTextures();
+        this.createShaderPrograms();
+        this.createGeometry();
+        this.initializeParticles();
+        this.isInitialized = true;
+        console.log("Plan A initialized successfully");
+      } catch (error) {
+        this.dispose();
+        throw error;
+      }
+    }
+    createTextures() {
+      const { width, height } = this.gpuTexture.getTextureDimensions(this.options.particleCount);
+      console.log(`Creating textures: ${width}x${height} for ${this.options.particleCount} particles`);
+      this.positionTextures = this.gpuTexture.createPingPongTextures(width, height);
+      if (this.options.enableVelocityTexture) {
+        this.velocityTextures = this.gpuTexture.createPingPongTextures(width, height);
+      }
+      this.textureWidth = width;
+      this.textureHeight = height;
+    }
+    createShaderPrograms() {
+      const gl = this.gl;
+      this.updateProgram = this.createProgram(passVertSource, updateFragSource);
+      this.updateUniforms = {
+        u_positions: gl.getUniformLocation(this.updateProgram, "u_positions"),
+        u_velocities: gl.getUniformLocation(this.updateProgram, "u_velocities"),
+        u_time: gl.getUniformLocation(this.updateProgram, "u_time"),
+        u_dt: gl.getUniformLocation(this.updateProgram, "u_dt"),
+        u_frameCount: gl.getUniformLocation(this.updateProgram, "u_frameCount"),
+        u_samplingFraction: gl.getUniformLocation(this.updateProgram, "u_samplingFraction"),
+        u_texSize: gl.getUniformLocation(this.updateProgram, "u_texSize"),
+        u_particleCount: gl.getUniformLocation(this.updateProgram, "u_particleCount"),
+        u_worldMin: gl.getUniformLocation(this.updateProgram, "u_worldMin"),
+        u_worldMax: gl.getUniformLocation(this.updateProgram, "u_worldMax"),
+        u_seed: gl.getUniformLocation(this.updateProgram, "u_seed"),
+        u_integrationMethod: gl.getUniformLocation(this.updateProgram, "u_integrationMethod"),
+        u_wrapMode: gl.getUniformLocation(this.updateProgram, "u_wrapMode")
+      };
+      this.renderProgram = this.createProgram(renderVertSource, renderFragSource);
+      this.renderUniforms = {
+        u_positions: gl.getUniformLocation(this.renderProgram, "u_positions"),
+        u_texSize: gl.getUniformLocation(this.renderProgram, "u_texSize"),
+        u_projectionView: gl.getUniformLocation(this.renderProgram, "u_projectionView"),
+        u_pointSize: gl.getUniformLocation(this.renderProgram, "u_pointSize")
+      };
+    }
+    createProgram(vertexSource, fragmentSource) {
+      const gl = this.gl;
+      const vertexShader = this.createShader(gl.VERTEX_SHADER, vertexSource);
+      const fragmentShader = this.createShader(gl.FRAGMENT_SHADER, fragmentSource);
+      const program = gl.createProgram();
+      gl.attachShader(program, vertexShader);
+      gl.attachShader(program, fragmentShader);
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        const info = gl.getProgramInfoLog(program);
+        gl.deleteProgram(program);
+        throw new Error(`Shader program link failed: ${info}`);
+      }
+      gl.deleteShader(vertexShader);
+      gl.deleteShader(fragmentShader);
+      return program;
+    }
+    createShader(type, source) {
+      const gl = this.gl;
+      const shader = gl.createShader(type);
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        const info = gl.getShaderInfoLog(shader);
+        gl.deleteShader(shader);
+        throw new Error(`Shader compile failed: ${info}
+Source:
+${source}`);
+      }
+      return shader;
+    }
+    createGeometry() {
+      const gl = this.gl;
+      const quadVertices = new Float32Array([
+        -1,
+        -1,
+        1,
+        -1,
+        -1,
+        1,
+        1,
+        1
+      ]);
+      this.quadVAO = gl.createVertexArray();
+      gl.bindVertexArray(this.quadVAO);
+      const quadBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, quadVertices, gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+      const particleIndices = new Float32Array(this.options.particleCount);
+      for (let i = 0; i < this.options.particleCount; i++) {
+        particleIndices[i] = i;
+      }
+      this.particleVAO = gl.createVertexArray();
+      gl.bindVertexArray(this.particleVAO);
+      const indexBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, particleIndices, gl.STATIC_DRAW);
+      const a_index = gl.getAttribLocation(this.renderProgram, "a_index");
+      gl.enableVertexAttribArray(a_index);
+      gl.vertexAttribPointer(a_index, 1, gl.FLOAT, false, 0, 0);
+      gl.bindVertexArray(null);
+    }
+    initializeParticles() {
+      const positions = generateParticlePositions(
+        this.options.particleCount,
+        this.options.seed,
+        this.options.worldBounds
+      );
+      this.gpuTexture.uploadParticleData(
+        this.positionTextures.textures[0],
+        this.textureWidth,
+        this.textureHeight,
+        positions
+      );
+      this.gpuTexture.uploadParticleData(
+        this.positionTextures.textures[1],
+        this.textureWidth,
+        this.textureHeight,
+        positions
+      );
+      if (this.velocityTextures) {
+        const velocities = generateParticleVelocities(
+          this.options.particleCount,
+          this.options.seed + 1
+        );
+        this.gpuTexture.uploadParticleData(
+          this.velocityTextures.textures[0],
+          this.textureWidth,
+          this.textureHeight,
+          velocities
+        );
+        this.gpuTexture.uploadParticleData(
+          this.velocityTextures.textures[1],
+          this.textureWidth,
+          this.textureHeight,
+          velocities
+        );
+      }
+      console.log("Particle data initialized");
+    }
+    step() {
+      if (!this.isInitialized) {
+        throw new Error("Plan A not initialized. Call init() first.");
+      }
+      this.performanceMonitor.beginFrame();
+      this.runUpdatePass();
+      this.time += this.options.dt;
+      this.frameCount++;
+      this.performanceMonitor.endFrame();
+    }
+    runUpdatePass() {
+      const gl = this.gl;
+      gl.useProgram(this.updateProgram);
+      const targetFramebuffer = this.positionTextures.getTargetFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, targetFramebuffer);
+      gl.viewport(0, 0, this.textureWidth, this.textureHeight);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.positionTextures.getCurrentTexture());
+      gl.uniform1i(this.updateUniforms.u_positions, 0);
+      if (this.velocityTextures) {
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, this.velocityTextures.getCurrentTexture());
+        gl.uniform1i(this.updateUniforms.u_velocities, 1);
+      }
+      gl.uniform1f(this.updateUniforms.u_time, this.time);
+      gl.uniform1f(this.updateUniforms.u_dt, this.options.dt);
+      gl.uniform1i(this.updateUniforms.u_frameCount, this.frameCount);
+      gl.uniform1f(this.updateUniforms.u_samplingFraction, this.options.samplingFraction);
+      gl.uniform2f(this.updateUniforms.u_texSize, this.textureWidth, this.textureHeight);
+      gl.uniform1i(this.updateUniforms.u_particleCount, this.options.particleCount);
+      const { min, max } = this.options.worldBounds;
+      gl.uniform3f(this.updateUniforms.u_worldMin, min[0], min[1], min[2]);
+      gl.uniform3f(this.updateUniforms.u_worldMax, max[0], max[1], max[2]);
+      gl.uniform1ui(this.updateUniforms.u_seed, this.options.seed);
+      gl.uniform1i(this.updateUniforms.u_integrationMethod, this.options.integrationMethod === "euler" ? 0 : 1);
+      gl.uniform1i(this.updateUniforms.u_wrapMode, this.options.wrapMode === "wrap" ? 0 : 1);
+      gl.bindVertexArray(this.quadVAO);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      this.positionTextures.swap();
+      if (this.velocityTextures) {
+        this.velocityTextures.swap();
+      }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.bindVertexArray(null);
+    }
+    render(projectionViewMatrix) {
+      if (!this.isInitialized) return;
+      const gl = this.gl;
+      gl.useProgram(this.renderProgram);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.positionTextures.getCurrentTexture());
+      gl.uniform1i(this.renderUniforms.u_positions, 0);
+      gl.uniform2f(this.renderUniforms.u_texSize, this.textureWidth, this.textureHeight);
+      gl.uniformMatrix4fv(this.renderUniforms.u_projectionView, false, projectionViewMatrix);
+      gl.uniform1f(this.renderUniforms.u_pointSize, this.options.pointSize);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.bindVertexArray(this.particleVAO);
+      gl.drawArrays(gl.POINTS, 0, this.options.particleCount);
+      gl.disable(gl.BLEND);
+      gl.bindVertexArray(null);
+    }
+    resize(newParticleCount) {
+      console.log(`Resizing from ${this.options.particleCount} to ${newParticleCount} particles`);
+      this.gpuTexture.validateParticleCount(newParticleCount);
+      const oldPositionTextures = this.positionTextures;
+      const oldVelocityTextures = this.velocityTextures;
+      this.options.particleCount = newParticleCount;
+      this.createTextures();
+      this.createGeometry();
+      this.initializeParticles();
+      if (oldPositionTextures) {
+        this.cleanupPingPongTextures(oldPositionTextures);
+      }
+      if (oldVelocityTextures) {
+        this.cleanupPingPongTextures(oldVelocityTextures);
+      }
+    }
+    setSamplingFraction(fraction) {
+      this.options.samplingFraction = Math.max(0.01, Math.min(1, fraction));
+    }
+    readback(maxCount = 1e3) {
+      const count = Math.min(maxCount, this.options.particleCount);
+      const data = this.gpuTexture.readTextureData(
+        this.positionTextures.getCurrentTexture(),
+        this.textureWidth,
+        this.textureHeight
+      );
+      const particles = [];
+      for (let i = 0; i < count; i++) {
+        const base = i * 4;
+        particles.push({
+          x: data[base + 0],
+          y: data[base + 1],
+          z: data[base + 2],
+          mass: data[base + 3]
+        });
+      }
+      return particles;
+    }
+    getMetrics() {
+      const metrics = this.performanceMonitor.getMetrics();
+      const memEstimate = this.gpuTexture.estimateMemoryUsage(this.options.particleCount);
+      return {
+        fps: metrics.fps,
+        frameTime: metrics.frameTime,
+        memoryMB: memEstimate.memoryMB,
+        particleCount: this.options.particleCount,
+        samplingFraction: this.options.samplingFraction,
+        frameCount: this.frameCount
+      };
+    }
+    cleanupPingPongTextures(pingPong) {
+      const gl = this.gl;
+      pingPong.textures.forEach((texture) => gl.deleteTexture(texture));
+      pingPong.framebuffers.forEach((fbo) => gl.deleteFramebuffer(fbo));
+    }
+    dispose() {
+      if (!this.gl) return;
+      const gl = this.gl;
+      if (this.positionTextures) {
+        this.cleanupPingPongTextures(this.positionTextures);
+      }
+      if (this.velocityTextures) {
+        this.cleanupPingPongTextures(this.velocityTextures);
+      }
+      if (this.updateProgram) gl.deleteProgram(this.updateProgram);
+      if (this.renderProgram) gl.deleteProgram(this.renderProgram);
+      if (this.quadVAO) gl.deleteVertexArray(this.quadVAO);
+      if (this.particleVAO) gl.deleteVertexArray(this.particleVAO);
+      if (this.performanceMonitor) {
+        this.performanceMonitor.dispose();
+      }
+      if (this.gpuTexture) {
+        this.gpuTexture.dispose();
+      }
+      if (this.threeMesh && this.scene) {
+        this.scene.remove(this.threeMesh);
+      }
+      this.isInitialized = false;
+      console.log("Plan A disposed");
+    }
+    // Legacy Three.js integration methods
+    start() {
+      this.running = true;
+      if (!this.isInitialized && this.gl) {
+        this.init().catch((error) => {
+          console.error("Plan A initialization failed:", error);
+          this.createFallbackPoints();
+        });
+      } else if (!this.gl && this.scene) {
+        this.createFallbackPoints();
+      }
+      console.log("Plan A started");
+    }
+    stop() {
+      this.running = false;
+      console.log("Plan A stopped");
+    }
+    update() {
+      if (!this.running) return;
+      if (this.isInitialized) {
+        this.step();
+        if (this.renderer && this.scene) {
+          this.renderToThreeJS();
+        }
+      }
+    }
+    renderToThreeJS() {
+      if (!this.renderer) return;
+      const camera2 = this.renderer.info?.render?.calls > 0 ? this.scene.children.find((obj) => obj.isCamera) || this.renderer.xr?.getCamera() : null;
+      if (camera2) {
+        const projectionMatrix = camera2.projectionMatrix;
+        const viewMatrix = camera2.matrixWorldInverse;
+        const projectionView = projectionMatrix.clone().multiply(viewMatrix);
+        const oldViewport = this.gl.getParameter(this.gl.VIEWPORT);
+        const oldProgram = this.gl.getParameter(this.gl.CURRENT_PROGRAM);
+        this.render(projectionView.elements);
+        this.gl.viewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
+        this.gl.useProgram(oldProgram);
+      }
+    }
+    createFallbackPoints() {
+      if (!this.scene) return;
+      console.log("Creating fallback Three.js points");
+      const geometry = new BufferGeometry();
+      const count = Math.min(1e4, this.options.particleCount);
+      const positions = new Float32Array(count * 3);
+      for (let i = 0; i < count; i++) {
+        positions[i * 3 + 0] = (Math.random() - 0.5) * 20;
+        positions[i * 3 + 1] = (Math.random() - 0.5) * 20;
+        positions[i * 3 + 2] = (Math.random() - 0.5) * 20;
+      }
+      geometry.setAttribute("position", new BufferAttribute(positions, 3));
+      const material = new PointsMaterial({
+        color: 6737151,
+        size: 0.05,
+        transparent: true,
+        opacity: 0.8
+      });
+      this.threeMesh = new Points(geometry, material);
+      this.scene.add(this.threeMesh);
+      this._objects.push(this.threeMesh);
+      console.log(`Added ${count} fallback particles to scene`);
+    }
+    // Legacy compatibility methods
+    getFrameStats() {
+      const metrics = this.getMetrics();
+      return {
+        mean: metrics.frameTime,
+        median: metrics.frameTime,
+        last: metrics.frameTime
+      };
+    }
+  };
+
+  // src/plan-c/index.js
   var PlanC = class {
     constructor(scene2, renderer2) {
       this.scene = scene2;
@@ -26415,7 +27504,7 @@ void main() {
     }
   };
 
-  // src/plans/plan-d.js
+  // src/plan-d/index.js
   var PlanD = class {
     constructor(scene2, renderer2) {
       this.scene = scene2;
@@ -26444,7 +27533,7 @@ void main() {
     }
   };
 
-  // src/plans/plan-m.js
+  // src/plan-m/index.js
   var PlanM = class {
     constructor(scene2, renderer2) {
       this.scene = scene2;
@@ -26482,6 +27571,8 @@ void main() {
   camera.position.set(0, 0, 5);
   var renderer = new WebGLRenderer({ antialias: true });
   renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.domElement.style.width = "100%";
+  renderer.domElement.style.height = "100%";
   container.appendChild(renderer.domElement);
   var controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
@@ -26501,6 +27592,13 @@ void main() {
     if (activePlan && activePlan.stop) activePlan.stop();
     activePlan = plans[key];
     if (activePlan && activePlan.start) activePlan.start();
+    try {
+      const hud = document.getElementById("hud");
+      if (hud) {
+        hud.querySelectorAll("button").forEach((b) => b.classList.toggle("active", b.getAttribute("data-plan") === key));
+      }
+    } catch (err) {
+    }
   }
   window.addEventListener("keydown", (e) => {
     if (e.key === "1") switchPlan("a");

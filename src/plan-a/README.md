@@ -1,31 +1,102 @@
-Plan A — Texture-Based Brute Force with Stochastic Sampling
-=============================================================
+# Plan A - Texture-Based Brute Force with Stochastic Sampling
 
-This folder contains the Plan A baseline: GPU-resident particle state stored in textures,
-with a fragment shader `update.frag` that advances positions and velocities. The update
-shader implements a stochastic neighbor sampling strategy to reduce per-frame work.
+Plan A is a GPU-driven particle system that uses texture-based storage and stochastic neighbor sampling to simulate particle interactions efficiently.
 
-Files added by the initial scaffold:
-- `index.js` — API stub and capability probe (class `PlanA`)
-- `gpu/update.frag` — fragment shader header + sampling loop
-- `gpu/render.vert` — vertex shader that renders particles by sampling the positions texture
-- `bench.js` — minimal bench harness to collect frame-time statistics
+## Features
 
-Quick start (developer):
-1. Ensure dependencies from repository root are installed (see project README).
-2. Import `PlanA` into your app and construct with a WebGL2 rendering context:
+- **GPU-Accelerated**: All particle physics computed on GPU using WebGL2 compute shaders
+- **Ping-Pong Textures**: Position and velocity data stored in RGBA32F textures with ping-pong buffering
+- **Stochastic Sampling**: Reduces O(N²) complexity by sampling only a fraction of neighbors per frame
+- **Temporal Accumulation**: Approximates full N×N forces over time through partial sampling
+- **Fallback Support**: Automatic fallback to 8-bit texture packing for devices without float texture support
+- **Performance Monitoring**: Built-in FPS, frame time, and memory usage tracking
 
-```js
+## Quick Start
+
+```javascript
 import PlanA from './src/plan-a/index.js';
-const plan = new PlanA(gl, { particleCount: 100000 });
+
+// Get WebGL2 context
+const canvas = document.getElementById('canvas');
+const gl = canvas.getContext('webgl2');
+
+// Create and initialize Plan A
+const planA = new PlanA(gl, {
+  particleCount: 100000,
+  samplingFraction: 0.25,
+  worldBounds: { min: [-10, -10, -10], max: [10, 10, 10] }
+});
+
+await planA.init();
+
+// Animation loop
+function animate() {
+  // Update physics
+  planA.step();
+  
+  // Render particles
+  const projectionView = getProjectionViewMatrix(); // Your camera matrix
+  planA.render(projectionView);
+  
+  requestAnimationFrame(animate);
+}
+animate();
 ```
 
-3. Upload initial positions using `PlanA.createInitialPositions` and set up textures.
-4. Each frame call `plan.step(dt)` then `plan.render(projectionView)`; use `Bench` to record timings.
+## API Reference
 
-Design notes and next steps:
-- The shader headers in `gpu/` show exact uniform lists and index->UV formulas; copy them into
-  your concrete shader compilation/wrapper code and wire uniforms accordingly.
-- Add FBO/texture creation in `index.js` where the `...existing code...` comment is placed.
-- Implement the packed RGBA8 fallback path for devices without float FBO support.
-- Add smoke tests that run a few frames, perform a `gl.readPixels`, and validate expected changes.
+### Constructor
+```javascript
+new PlanA(gl, options)
+```
+
+### Methods
+
+#### `async init()`
+Initialize GPU resources and validate capabilities. Must be called before using other methods.
+
+#### `step()`
+Run one simulation step (update + internal state advancement).
+
+#### `render(projectionViewMatrix)`
+Render particles using provided camera matrix.
+
+#### `resize(newParticleCount)`
+Safely resize particle count with resource reallocation.
+
+#### `setSamplingFraction(fraction)`
+Update sampling fraction at runtime (0.01-1.0).
+
+#### `readback(maxCount = 1000)`
+Read particle positions back to CPU for testing/debugging (slow operation).
+
+#### `getMetrics()`
+Get performance metrics: `{fps, frameTime, memoryMB, particleCount, samplingFraction, frameCount}`.
+
+#### `dispose()`
+Clean up all GPU resources.
+
+## Performance Guidelines
+
+### Recommended Settings by Hardware
+
+| Hardware Class | Particle Count | Sampling Fraction | Expected FPS |
+|----------------|----------------|-------------------|--------------|
+| Desktop High   | 1,000,000      | 0.25              | 60+ fps      |
+| Desktop Mid    | 500,000        | 0.25              | 60+ fps      |
+| Desktop Low    | 100,000        | 0.25              | 30+ fps      |
+| Mobile High    | 50,000         | 0.20              | 30+ fps      |
+| Mobile Low     | 10,000         | 0.15              | 30+ fps      |
+
+## Testing
+
+```javascript
+// Basic smoke test
+const planA = new PlanA(gl, { particleCount: 1000 });
+await planA.init();
+planA.step();
+const particles = planA.readback(10);
+console.log('First 10 particles:', particles);
+```
+
+For comprehensive testing, see the test specifications in `docs/1-plan.md`.

@@ -1,27 +1,31 @@
 #version 300 es
-precision highp float;
-precision highp int;
 
-in float a_index; // per-instance particle index
-uniform sampler2D u_positions;
-uniform vec2 u_texSize; // width,height
-uniform mat4 u_projectionView;
+// Point rendering vertex shader - reads particle positions from texture
+// Each vertex represents one particle, rendered as a point
 
-out vec3 v_color;
+in float a_index;               // Particle index
 
-vec2 indexToUV(int index) {
-    int W = int(u_texSize.x);
-    int x = index % W;
-    int y = index / W;
-    return (vec2(float(x) + 0.5, float(y) + 0.5) ) / u_texSize;
+uniform sampler2D u_positions;  // Position texture
+uniform vec2 u_texSize;         // Texture dimensions
+uniform mat4 u_projectionView;  // Combined projection-view matrix
+uniform float u_pointSize;      // Point size in pixels
+
+out vec3 v_color;               // Color based on velocity/force
+
+vec2 indexToUV(float index) {
+  float x = mod(index, u_texSize.x);
+  float y = floor(index / u_texSize.x);
+  return (vec2(x, y) + 0.5) / u_texSize;
 }
 
 void main() {
-    int idx = int(a_index + 0.5);
-    vec2 uv = indexToUV(idx);
-    vec3 pos = texture(u_positions, uv).xyz;
-
-    gl_Position = u_projectionView * vec4(pos, 1.0);
-    gl_PointSize = 2.0; // tweakable or per-instance attribute
-    v_color = vec3(1.0, 1.0, 1.0);
+  vec2 uv = indexToUV(a_index);
+  vec4 posData = texture(u_positions, uv);
+  vec3 worldPos = posData.xyz;
+  
+  gl_Position = u_projectionView * vec4(worldPos, 1.0);
+  gl_PointSize = u_pointSize;
+  
+  // Color based on position for visualization
+  v_color = normalize(worldPos) * 0.5 + 0.5;
 }
