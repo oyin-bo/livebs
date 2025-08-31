@@ -1,10 +1,10 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
-import PlanA from './plans/plan-a/index.js';
-import PlanC from './plans/plan-c/index.js';
-import PlanD from './plans/plan-d/index.js';
-import PlanM from './plans/plan-m/index.js';
+import PlanA from './plan-a/index.js';
+import PlanC from './plan-c/index.js';
+import PlanD from './plan-d/index.js';
+import PlanM from './plan-m/index.js';
 
 // Basic renderer + scene + camera
 const container = document.getElementById('app');
