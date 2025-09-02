@@ -26741,9 +26741,18 @@ void main() {
      * Initialize GPU timing if available
      */
     initGPUTiming(gl) {
-      this.gpuTimerExt = gl.getExtension("EXT_disjoint_timer_query_webgl2");
-      if (this.gpuTimerExt) {
-        console.log("GPU timing enabled");
+      try {
+        const ext = gl.getExtension("EXT_disjoint_timer_query_webgl2");
+        if (ext && typeof ext.createQueryEXT === "function" && typeof ext.deleteQueryEXT === "function" && typeof ext.beginQueryEXT === "function" && typeof ext.endQueryEXT === "function" && typeof ext.queryCounterEXT === "function" && typeof ext.getQueryObjectEXT === "function" && ext.TIME_ELAPSED_EXT !== void 0) {
+          this.gpuTimerExt = ext;
+          console.log("GPU timing enabled");
+        } else {
+          console.log("GPU timing extension incomplete or unavailable");
+          this.gpuTimerExt = null;
+        }
+      } catch (error) {
+        console.warn("GPU timing initialization failed:", error);
+        this.gpuTimerExt = null;
       }
     }
     /**
@@ -26752,9 +26761,14 @@ void main() {
     beginFrame() {
       this.frameStart = performance.now();
       if (this.gpuTimerExt) {
-        const query = this.gpuTimerExt.createQueryEXT();
-        this.gpuTimerExt.beginQueryEXT(this.gpuTimerExt.TIME_ELAPSED_EXT, query);
-        this.gpuQueries.push({ query, frameCount: this.frameCount });
+        try {
+          const query = this.gpuTimerExt.createQueryEXT();
+          this.gpuTimerExt.beginQueryEXT(this.gpuTimerExt.TIME_ELAPSED_EXT, query);
+          this.gpuQueries.push({ query, frameCount: this.frameCount });
+        } catch (error) {
+          console.warn("GPU timing beginFrame failed:", error);
+          this.gpuTimerExt = null;
+        }
       }
     }
     /**
@@ -26768,7 +26782,12 @@ void main() {
       }
       this.frameCount++;
       if (this.gpuTimerExt) {
-        this.gpuTimerExt.endQueryEXT(this.gpuTimerExt.TIME_ELAPSED_EXT);
+        try {
+          this.gpuTimerExt.endQueryEXT(this.gpuTimerExt.TIME_ELAPSED_EXT);
+        } catch (error) {
+          console.warn("GPU timing endFrame failed:", error);
+          this.gpuTimerExt = null;
+        }
       }
       this.processGPUQueries();
     }
@@ -26779,14 +26798,25 @@ void main() {
       if (!this.gpuTimerExt) return;
       for (let i = this.gpuQueries.length - 1; i >= 0; i--) {
         const queryInfo = this.gpuQueries[i];
-        if (this.gpuTimerExt.getQueryObjectEXT(queryInfo.query, this.gpuTimerExt.QUERY_RESULT_AVAILABLE_EXT)) {
-          const gpuTime = this.gpuTimerExt.getQueryObjectEXT(queryInfo.query, this.gpuTimerExt.QUERY_RESULT_EXT);
-          this.gpuTimings.push(gpuTime / 1e6);
-          if (this.gpuTimings.length > this.maxFrameHistory) {
-            this.gpuTimings.shift();
+        try {
+          if (this.gpuTimerExt.getQueryObjectEXT(queryInfo.query, this.gpuTimerExt.QUERY_RESULT_AVAILABLE_EXT)) {
+            const gpuTime = this.gpuTimerExt.getQueryObjectEXT(queryInfo.query, this.gpuTimerExt.QUERY_RESULT_EXT);
+            this.gpuTimings.push(gpuTime / 1e6);
+            if (this.gpuTimings.length > this.maxFrameHistory) {
+              this.gpuTimings.shift();
+            }
+            this.gpuTimerExt.deleteQueryEXT(queryInfo.query);
+            this.gpuQueries.splice(i, 1);
           }
-          this.gpuTimerExt.deleteQueryEXT(queryInfo.query);
+        } catch (error) {
+          console.warn("GPU timing query processing failed:", error);
+          try {
+            this.gpuTimerExt.deleteQueryEXT(queryInfo.query);
+          } catch (deleteError) {
+          }
           this.gpuQueries.splice(i, 1);
+          this.gpuTimerExt = null;
+          break;
         }
       }
     }
