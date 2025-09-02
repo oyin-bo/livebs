@@ -7,7 +7,7 @@
 
 import * as THREE from 'three';
 
-// Simplified shaders for initial working implementation
+// Shader sources for the quadtree implementation
 const vertexShaderSource = `#version 300 es
 precision highp float;
 
@@ -17,10 +17,48 @@ void main() {
   gl_Position = vec4(a_position, 0.0, 1.0);
 }`;
 
+const particleAggregationVertexShader = `#version 300 es
+precision highp float;
+
+in vec3 a_position;
+in float a_mass;
+
+uniform mat4 u_worldToGrid;
+uniform vec2 u_gridSize;
+
+out vec4 v_particleData;
+
+void main() {
+  // Transform particle position to grid space
+  vec4 gridPos = u_worldToGrid * vec4(a_position, 1.0);
+  
+  // Convert to texture coordinates (0 to gridSize)
+  vec2 texCoord = gridPos.xy * u_gridSize;
+  
+  // Output as screen coordinates for point rendering
+  gl_Position = vec4((texCoord / u_gridSize) * 2.0 - 1.0, 0.0, 1.0);
+  gl_PointSize = 1.0;
+  
+  // Pass data for fragment shader aggregation
+  v_particleData = vec4(a_position.xy * a_mass, a_mass, 1.0); // weighted position + mass + count
+}`;
+
+const particleAggregationFragmentShader = `#version 300 es
+precision highp float;
+
+in vec4 v_particleData;
+out vec4 fragColor;
+
+void main() {
+  // Output components that will be additively blended
+  fragColor = v_particleData; // sum_x, sum_y, mass, count
+}`;
+
 const reductionFragmentShader = `#version 300 es
 precision highp float;
 
 uniform sampler2D u_previousLevel;
+uniform vec2 u_previousLevelSize;
 
 out vec4 fragColor;
 
@@ -38,6 +76,99 @@ void main() {
   vec4 aggregate = child00 + child01 + child10 + child11;
   
   fragColor = aggregate;
+}`;
+
+const traversalFragmentShader = `#version 300 es
+precision highp float;
+
+uniform sampler2D u_particlePositions;
+uniform sampler2D u_quadtreeLevel0;
+uniform sampler2D u_quadtreeLevel1;
+uniform sampler2D u_quadtreeLevel2;
+uniform sampler2D u_quadtreeLevel3;
+uniform sampler2D u_quadtreeLevel4;
+uniform sampler2D u_quadtreeLevel5;
+uniform sampler2D u_quadtreeLevel6;
+uniform sampler2D u_quadtreeLevel7;
+uniform float u_theta;
+uniform int u_numLevels;
+uniform float u_cellSizes[8];
+uniform vec2 u_texSize;
+uniform int u_particleCount;
+
+out vec4 fragColor;
+
+vec4 sampleLevel(int level, ivec2 coord) {
+  if (level == 0) { return texelFetch(u_quadtreeLevel0, coord, 0); }
+  else if (level == 1) { return texelFetch(u_quadtreeLevel1, coord, 0); }
+  else if (level == 2) { return texelFetch(u_quadtreeLevel2, coord, 0); }
+  else if (level == 3) { return texelFetch(u_quadtreeLevel3, coord, 0); }
+  else if (level == 4) { return texelFetch(u_quadtreeLevel4, coord, 0); }
+  else if (level == 5) { return texelFetch(u_quadtreeLevel5, coord, 0); }
+  else if (level == 6) { return texelFetch(u_quadtreeLevel6, coord, 0); }
+  else if (level == 7) { return texelFetch(u_quadtreeLevel7, coord, 0); }
+  else { return vec4(0.0); }
+}
+
+vec2 getLevelSize(int level) {
+  if (level == 0) { return textureSize(u_quadtreeLevel0, 0); }
+  else if (level == 1) { return textureSize(u_quadtreeLevel1, 0); }
+  else if (level == 2) { return textureSize(u_quadtreeLevel2, 0); }
+  else if (level == 3) { return textureSize(u_quadtreeLevel3, 0); }
+  else if (level == 4) { return textureSize(u_quadtreeLevel4, 0); }
+  else if (level == 5) { return textureSize(u_quadtreeLevel5, 0); }
+  else if (level == 6) { return textureSize(u_quadtreeLevel6, 0); }
+  else if (level == 7) { return textureSize(u_quadtreeLevel7, 0); }
+  else { return vec2(1.0); }
+}
+
+void main() {
+  ivec2 coord = ivec2(gl_FragCoord.xy);
+  int myIndex = coord.y * int(u_texSize.x) + coord.x;
+  
+  if (myIndex >= u_particleCount) {
+    fragColor = vec4(0.0);
+    return;
+  }
+  
+  vec2 myUV = (vec2(coord) + 0.5) / u_texSize;
+  vec3 myPos = texture(u_particlePositions, myUV).xyz;
+  vec3 totalForce = vec3(0.0);
+  
+  // Simple traversal (simplified for initial implementation)
+  for (int level = min(u_numLevels - 1, 7); level >= 0; level--) {
+    vec2 levelSize = getLevelSize(level);
+    vec2 nodeCoord = (myPos.xy / u_cellSizes[level]) * levelSize;
+    ivec2 nodeIndex = ivec2(floor(nodeCoord));
+    
+    // Clamp to valid range
+    nodeIndex = clamp(nodeIndex, ivec2(0), ivec2(levelSize) - 1);
+    
+    // Fetch node data
+    vec4 nodeData = sampleLevel(level, nodeIndex);
+    float massSum = nodeData.b;
+    float particleCount = nodeData.a;
+    
+    if (particleCount > 0.0) {
+      // Calculate center of mass
+      vec2 centerOfMass = nodeData.rg / massSum;
+      
+      // Distance to center of mass
+      float distance = length(myPos.xy - centerOfMass);
+      float nodeSize = u_cellSizes[level];
+      
+      // Barnes-Hut criterion: if far enough, use approximation
+      if ((nodeSize / distance) < u_theta || level == 0) {
+        // Use this node for force approximation
+        vec2 direction = centerOfMass - myPos.xy;
+        float forceMagnitude = massSum / (distance * distance + 0.01); // softening
+        totalForce.xy += normalize(direction) * forceMagnitude;
+        break;
+      }
+    }
+  }
+  
+  fragColor = vec4(totalForce, 0.0);
 }`;
 
 const renderVertexShader = `#version 300 es
@@ -110,6 +241,7 @@ export default class PlanM {
     this.levelTextures = [];
     this.levelFramebuffers = [];
     this.positionTextures = null;
+    this.velocityTextures = null;
     this.programs = {};
     this.quadVAO = null;
     this.particleVAO = null;
@@ -165,7 +297,7 @@ export default class PlanM {
   calculateTextureDimensions() {
     // Calculate L0 size to fit particles with reasonable density
     this.L0Size = Math.max(64, Math.ceil(Math.sqrt(this.options.particleCount * 4))); // 4x oversampling
-    this.numLevels = Math.min(8, Math.ceil(Math.log2(this.L0Size)) + 1); // Limit to 8 levels
+    this.numLevels = Math.ceil(Math.log2(this.L0Size)) + 1;
     
     // For position textures
     this.textureWidth = Math.ceil(Math.sqrt(this.options.particleCount));
@@ -178,10 +310,22 @@ export default class PlanM {
   createShaderPrograms() {
     const gl = this.gl;
     
+    // Aggregation program
+    this.programs.aggregation = this.createProgram(
+      particleAggregationVertexShader, 
+      particleAggregationFragmentShader
+    );
+    
     // Reduction program
     this.programs.reduction = this.createProgram(
       vertexShaderSource, 
       reductionFragmentShader
+    );
+    
+    // Traversal program
+    this.programs.traversal = this.createProgram(
+      vertexShaderSource, 
+      traversalFragmentShader
     );
     
     // Render program
@@ -260,6 +404,7 @@ export default class PlanM {
     
     // Create particle position textures (ping-pong)
     this.positionTextures = this.createPingPongTextures(this.textureWidth, this.textureHeight);
+    this.velocityTextures = this.createPingPongTextures(this.textureWidth, this.textureHeight);
     
     console.log(`Created ${this.numLevels} quadtree level textures and particle textures`);
   }
@@ -334,32 +479,28 @@ export default class PlanM {
 
   initializeParticles() {
     const positions = new Float32Array(this.options.particleCount * 4);
+    const velocities = new Float32Array(this.options.particleCount * 4);
     
-    // Generate random particles within world bounds that form a swarm pattern
+    // Generate random particles within world bounds
     const bounds = this.options.worldBounds;
-    const center = [
-      (bounds.min[0] + bounds.max[0]) / 2,
-      (bounds.min[1] + bounds.max[1]) / 2,
-      (bounds.min[2] + bounds.max[2]) / 2
-    ];
-    
     for (let i = 0; i < this.options.particleCount; i++) {
       const base = i * 4;
-      
-      // Create clustered distribution for better visualization
-      const angle = Math.random() * Math.PI * 2;
-      const radius = Math.random() * 8 + Math.random() * 2; // Bias toward center
-      const height = (Math.random() - 0.5) * 4;
-      
-      positions[base + 0] = center[0] + Math.cos(angle) * radius;
-      positions[base + 1] = center[1] + Math.sin(angle) * radius;
-      positions[base + 2] = center[2] + height;
+      positions[base + 0] = bounds.min[0] + Math.random() * (bounds.max[0] - bounds.min[0]);
+      positions[base + 1] = bounds.min[1] + Math.random() * (bounds.max[1] - bounds.min[1]);
+      positions[base + 2] = bounds.min[2] + Math.random() * (bounds.max[2] - bounds.min[2]);
       positions[base + 3] = 1.0; // mass
+      
+      velocities[base + 0] = (Math.random() - 0.5) * 2.0;
+      velocities[base + 1] = (Math.random() - 0.5) * 2.0;
+      velocities[base + 2] = (Math.random() - 0.5) * 2.0;
+      velocities[base + 3] = 0.0; // unused
     }
     
     // Upload to GPU
     this.uploadTextureData(this.positionTextures.textures[0], positions);
     this.uploadTextureData(this.positionTextures.textures[1], positions);
+    this.uploadTextureData(this.velocityTextures.textures[0], velocities);
+    this.uploadTextureData(this.velocityTextures.textures[1], velocities);
     
     console.log('Particle data initialized');
   }
@@ -402,12 +543,17 @@ export default class PlanM {
   }
 
   step() {
-    // Build quadtree (simplified for initial implementation)
+    // Build quadtree
     this.buildQuadtree();
     
-    // Simple animation - rotate particles slightly
-    this.time += this.options.dt;
+    // Calculate forces using traversal
+    this.calculateForces();
+    
+    // Integrate physics (simplified for now)
+    this.integratePhysics();
+    
     this.frameCount++;
+    this.time += this.options.dt;
   }
 
   buildQuadtree() {
@@ -421,25 +567,102 @@ export default class PlanM {
       gl.clear(gl.COLOR_BUFFER_BIT);
     }
     
-    // For now, just populate L0 with dummy data and test reduction
-    this.populateL0WithTestData();
+    // Step 1: Aggregate particles into L0 using additive blending
+    this.aggregateParticlesIntoL0();
     
-    // Build pyramid via reduction passes
+    // Step 2: Build pyramid via reduction passes
     for (let level = 0; level < this.numLevels - 1; level++) {
       this.runReductionPass(level, level + 1);
     }
   }
 
-  populateL0WithTestData() {
+  aggregateParticlesIntoL0() {
     const gl = this.gl;
     
-    // Create simple test pattern in L0 for verification
+    // Use aggregation program
+    gl.useProgram(this.programs.aggregation);
+    
+    // Bind L0 framebuffer
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.levelFramebuffers[0]);
     gl.viewport(0, 0, this.levelTextures[0].size, this.levelTextures[0].size);
     
-    // Fill with a simple pattern
-    gl.clearColor(0.1, 0.2, 0.3, 1.0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
+    // Enable additive blending
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    
+    // Create and bind particle position data for aggregation
+    this.createParticleAggregationGeometry();
+    
+    // Set uniforms for world-to-grid transformation
+    const worldSize = this.options.worldBounds.max[0] - this.options.worldBounds.min[0];
+    const gridSize = this.levelTextures[0].size;
+    
+    // Simple world-to-grid matrix (just scaling for now)
+    const worldToGrid = new Float32Array([
+      gridSize / worldSize, 0, 0, 0,
+      0, gridSize / worldSize, 0, 0,
+      0, 0, 1, 0,
+      -this.options.worldBounds.min[0] * gridSize / worldSize,
+      -this.options.worldBounds.min[1] * gridSize / worldSize, 0, 1
+    ]);
+    
+    const u_worldToGrid = gl.getUniformLocation(this.programs.aggregation, 'u_worldToGrid');
+    const u_gridSize = gl.getUniformLocation(this.programs.aggregation, 'u_gridSize');
+    
+    gl.uniformMatrix4fv(u_worldToGrid, false, worldToGrid);
+    gl.uniform2f(u_gridSize, gridSize, gridSize);
+    
+    // Render particles as points to aggregate them
+    gl.bindVertexArray(this.aggregationVAO);
+    gl.drawArrays(gl.POINTS, 0, this.options.particleCount);
+    
+    gl.disable(gl.BLEND);
+    gl.bindVertexArray(null);
+  }
+
+  createParticleAggregationGeometry() {
+    if (this.aggregationVAO) return;
+    
+    const gl = this.gl;
+    
+    // Create VAO for particle aggregation
+    this.aggregationVAO = gl.createVertexArray();
+    gl.bindVertexArray(this.aggregationVAO);
+    
+    // Get current particle positions from texture (simplified approach)
+    // In a full implementation, we'd read from the position texture
+    // For now, let's create dummy data that matches our particle layout
+    const positions = new Float32Array(this.options.particleCount * 3);
+    const masses = new Float32Array(this.options.particleCount);
+    
+    // Generate particle data (this should come from the position texture in the real implementation)
+    const bounds = this.options.worldBounds;
+    for (let i = 0; i < this.options.particleCount; i++) {
+      positions[i * 3 + 0] = bounds.min[0] + Math.random() * (bounds.max[0] - bounds.min[0]);
+      positions[i * 3 + 1] = bounds.min[1] + Math.random() * (bounds.max[1] - bounds.min[1]);
+      positions[i * 3 + 2] = bounds.min[2] + Math.random() * (bounds.max[2] - bounds.min[2]);
+      masses[i] = 1.0;
+    }
+    
+    // Position buffer
+    const positionBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+    
+    const a_position = gl.getAttribLocation(this.programs.aggregation, 'a_position');
+    gl.enableVertexAttribArray(a_position);
+    gl.vertexAttribPointer(a_position, 3, gl.FLOAT, false, 0, 0);
+    
+    // Mass buffer
+    const massBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, massBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, masses, gl.STATIC_DRAW);
+    
+    const a_mass = gl.getAttribLocation(this.programs.aggregation, 'a_mass');
+    gl.enableVertexAttribArray(a_mass);
+    gl.vertexAttribPointer(a_mass, 1, gl.FLOAT, false, 0, 0);
+    
+    gl.bindVertexArray(null);
   }
 
   runReductionPass(sourceLevel, targetLevel) {
@@ -456,12 +679,83 @@ export default class PlanM {
     gl.bindTexture(gl.TEXTURE_2D, this.levelTextures[sourceLevel].texture);
     
     const u_previousLevel = gl.getUniformLocation(this.programs.reduction, 'u_previousLevel');
+    const u_previousLevelSize = gl.getUniformLocation(this.programs.reduction, 'u_previousLevelSize');
+    
     gl.uniform1i(u_previousLevel, 0);
+    gl.uniform2f(u_previousLevelSize, this.levelTextures[sourceLevel].size, this.levelTextures[sourceLevel].size);
     
     // Render full-screen quad
     gl.bindVertexArray(this.quadVAO);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     gl.bindVertexArray(null);
+  }
+
+  calculateForces() {
+    const gl = this.gl;
+    
+    gl.useProgram(this.programs.traversal);
+    
+    // Bind target framebuffer (velocity texture for force accumulation)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.velocityTextures.getTargetFramebuffer());
+    gl.viewport(0, 0, this.textureWidth, this.textureHeight);
+    
+    // Bind particle positions
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.positionTextures.getCurrentTexture());
+    
+    // Set position texture uniform
+    const u_particlePositions = gl.getUniformLocation(this.programs.traversal, 'u_particlePositions');
+    gl.uniform1i(u_particlePositions, 0);
+    
+    // Bind quadtree level textures
+    for (let i = 0; i < Math.min(8, this.numLevels); i++) {
+      gl.activeTexture(gl.TEXTURE1 + i);
+      gl.bindTexture(gl.TEXTURE_2D, this.levelTextures[i].texture);
+      
+      const uniformName = `u_quadtreeLevel${i}`;
+      const uniformLocation = gl.getUniformLocation(this.programs.traversal, uniformName);
+      if (uniformLocation !== null) {
+        gl.uniform1i(uniformLocation, 1 + i);
+      }
+    }
+    
+    // Set other uniforms
+    const u_theta = gl.getUniformLocation(this.programs.traversal, 'u_theta');
+    const u_numLevels = gl.getUniformLocation(this.programs.traversal, 'u_numLevels');
+    const u_texSize = gl.getUniformLocation(this.programs.traversal, 'u_texSize');
+    const u_particleCount = gl.getUniformLocation(this.programs.traversal, 'u_particleCount');
+    
+    gl.uniform1f(u_theta, this.options.theta);
+    gl.uniform1i(u_numLevels, this.numLevels);
+    gl.uniform2f(u_texSize, this.textureWidth, this.textureHeight);
+    gl.uniform1i(u_particleCount, this.options.particleCount);
+    
+    // Set cell sizes for each level
+    const cellSizes = [];
+    const worldSize = this.options.worldBounds.max[0] - this.options.worldBounds.min[0];
+    let currentSize = worldSize / this.L0Size;
+    for (let i = 0; i < 8; i++) {
+      cellSizes.push(currentSize);
+      currentSize *= 2;
+    }
+    
+    const u_cellSizes = gl.getUniformLocation(this.programs.traversal, 'u_cellSizes');
+    gl.uniform1fv(u_cellSizes, cellSizes);
+    
+    // Render full-screen quad to compute forces
+    gl.bindVertexArray(this.quadVAO);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.bindVertexArray(null);
+    
+    this.velocityTextures.swap();
+  }
+
+  integratePhysics() {
+    // Simple integration - just move particles slightly for visual feedback
+    // In a complete implementation, this would integrate forces into velocities and positions
+    
+    // For now, let's just swap the position textures to indicate we're processing
+    this.positionTextures.swap();
   }
 
   renderToThreeJS() {
@@ -548,57 +842,41 @@ export default class PlanM {
     // Create a more sophisticated quadtree visualization
     const group = new THREE.Group();
     
-    // Particle swarm - create a 3D swarm pattern
+    // Particle swarm
     const particleGeometry = new THREE.BufferGeometry();
-    const count = Math.min(this.options.particleCount, 50000);
+    const count = Math.min(10000, this.options.particleCount);
     const positions = new Float32Array(count * 3);
-    const colors = new Float32Array(count * 3);
     
-    // Create swarm pattern
     for (let i = 0; i < count; i++) {
-      const angle = Math.random() * Math.PI * 2;
-      const radius = Math.random() * 8 + Math.random() * 2;
-      const height = (Math.random() - 0.5) * 4;
-      
-      positions[i * 3 + 0] = Math.cos(angle) * radius;
-      positions[i * 3 + 1] = Math.sin(angle) * radius;
-      positions[i * 3 + 2] = height;
-      
-      // Color based on distance from center
-      const dist = Math.sqrt(positions[i * 3] ** 2 + positions[i * 3 + 1] ** 2 + positions[i * 3 + 2] ** 2);
-      colors[i * 3 + 0] = 0.2 + 0.8 * (1 - dist / 10);
-      colors[i * 3 + 1] = 0.4 + 0.6 * (1 - dist / 10);
-      colors[i * 3 + 2] = 0.8;
+      positions[i * 3 + 0] = (Math.random() - 0.5) * 20;
+      positions[i * 3 + 1] = (Math.random() - 0.5) * 20;
+      positions[i * 3 + 2] = (Math.random() - 0.5) * 20;
     }
     
     particleGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    particleGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    
     const particleMaterial = new THREE.PointsMaterial({ 
+      color: 0x66ccff, 
       size: 0.05,
       transparent: true,
-      opacity: 0.8,
-      vertexColors: true,
-      blending: THREE.AdditiveBlending
+      opacity: 0.8
     });
     
     const particles = new THREE.Points(particleGeometry, particleMaterial);
     group.add(particles);
     
-    // Quadtree levels visualization with proper scaling
+    // Quadtree levels visualization
     const levels = Math.min(6, this.numLevels);
     for (let i = 0; i < levels; i++) {
       const size = Math.pow(2, levels - i) * 0.1;
       const geo = new THREE.PlaneGeometry(size, size);
-      const hue = i / levels;
       const mat = new THREE.MeshBasicMaterial({ 
-        color: new THREE.Color().setHSL(hue, 0.6, 0.5), 
+        color: new THREE.Color().setHSL(i / levels, 0.6, 0.5), 
         side: THREE.DoubleSide, 
         transparent: true, 
-        opacity: 0.1 
+        opacity: 0.15 
       });
       const mesh = new THREE.Mesh(geo, mat);
-      mesh.position.set(0, 0, -i * 0.03);
+      mesh.position.set(0, 0, -i * 0.02);
       mesh.rotation.x = -Math.PI / 2;
       group.add(mesh);
     }
@@ -623,12 +901,18 @@ export default class PlanM {
       this.positionTextures.framebuffers.forEach(fbo => gl.deleteFramebuffer(fbo));
     }
     
+    if (this.velocityTextures) {
+      this.velocityTextures.textures.forEach(tex => gl.deleteTexture(tex));
+      this.velocityTextures.framebuffers.forEach(fbo => gl.deleteFramebuffer(fbo));
+    }
+    
     // Clean up programs
     Object.values(this.programs).forEach(program => gl.deleteProgram(program));
     
     // Clean up VAOs
     if (this.quadVAO) gl.deleteVertexArray(this.quadVAO);
     if (this.particleVAO) gl.deleteVertexArray(this.particleVAO);
+    if (this.aggregationVAO) gl.deleteVertexArray(this.aggregationVAO);
     
     // Clean up Three.js objects
     this._objects.forEach(o => this.scene.remove(o));
