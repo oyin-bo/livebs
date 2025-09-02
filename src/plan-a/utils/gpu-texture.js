@@ -227,7 +227,10 @@ export function uvToIndex(u, v, width, height) {
  * Generate deterministic particle positions
  */
 export function generateParticlePositions(count, seed = 12345, worldBounds = { min: [-10, -10, -10], max: [10, 10, 10] }) {
-  const positions = new Float32Array(count * 4); // RGBA
+  // Calculate texture dimensions to determine actual array size needed
+  const textureSize = Math.ceil(Math.sqrt(count));
+  const totalTexels = textureSize * textureSize;
+  const positions = new Float32Array(totalTexels * 4); // RGBA - pad to texture size
   
   // Simple LCG for deterministic random numbers
   let rng = seed;
@@ -246,6 +249,15 @@ export function generateParticlePositions(count, seed = 12345, worldBounds = { m
     positions[base + 3] = 1.0; // mass
   }
 
+  // Fill remaining texels with zero data (inactive particles)
+  for (let i = count; i < totalTexels; i++) {
+    const base = i * 4;
+    positions[base + 0] = 0.0;
+    positions[base + 1] = 0.0;
+    positions[base + 2] = 0.0;
+    positions[base + 3] = 0.0;
+  }
+
   return positions;
 }
 
@@ -253,7 +265,10 @@ export function generateParticlePositions(count, seed = 12345, worldBounds = { m
  * Generate deterministic particle velocities
  */
 export function generateParticleVelocities(count, seed = 54321) {
-  const velocities = new Float32Array(count * 4); // RGBA
+  // Calculate texture dimensions to determine actual array size needed
+  const textureSize = Math.ceil(Math.sqrt(count));
+  const totalTexels = textureSize * textureSize;
+  const velocities = new Float32Array(totalTexels * 4); // RGBA - pad to texture size
   
   let rng = seed;
   function random() {
@@ -269,6 +284,15 @@ export function generateParticleVelocities(count, seed = 54321) {
     velocities[base + 1] = (random() - 0.5) * 2.0; // vy
     velocities[base + 2] = (random() - 0.5) * 2.0; // vz
     velocities[base + 3] = 0.0; // padding
+  }
+
+  // Fill remaining texels with zero data (inactive particles)
+  for (let i = count; i < totalTexels; i++) {
+    const base = i * 4;
+    velocities[base + 0] = 0.0;
+    velocities[base + 1] = 0.0;
+    velocities[base + 2] = 0.0;
+    velocities[base + 3] = 0.0;
   }
 
   return velocities;

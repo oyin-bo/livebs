@@ -66,7 +66,15 @@ vec2 indexToUV(int index) {
 vec3 computePairForce(vec3 pos1, vec3 pos2, float mass1, float mass2) {
   vec3 dir = pos2 - pos1;
   float d2 = dot(dir, dir) + SOFTENING;
-  float force = mass1 * mass2 / d2;
+  float distance = sqrt(d2);
+  
+  // Social force with both attraction and repulsion
+  float attraction = mass1 * mass2 / (d2 + 1.0);
+  float repulsion = 0.1 / (distance + 0.1);
+  
+  // Create interesting dynamics: attraction at medium range, repulsion at close range
+  float force = attraction - repulsion * 2.0;
+  
   return force * normalize(dir);
 }
 
@@ -238,15 +246,15 @@ export default class PlanA {
     
     // Configuration with defaults
     this.options = {
-      particleCount: this.options.particleCount || 100000,
+      particleCount: this.options.particleCount || 50000,
       samplingFraction: this.options.samplingFraction || 0.25,
       dt: this.options.dt || 0.016,
       integrationMethod: this.options.integrationMethod || 'semi-implicit',
       wrapMode: this.options.wrapMode || 'wrap',
-      worldBounds: this.options.worldBounds || { min: [-10, -10, -10], max: [10, 10, 10] },
+      worldBounds: this.options.worldBounds || { min: [-5, -5, -5], max: [5, 5, 5] },
       enableVelocityTexture: this.options.enableVelocityTexture !== false,
       seed: this.options.seed || 12345,
-      pointSize: this.options.pointSize || 2.0
+      pointSize: this.options.pointSize || 8.0
     };
 
     // Internal state
@@ -289,6 +297,10 @@ export default class PlanA {
       
       this.isInitialized = true;
       console.log('Plan A initialized successfully');
+    
+    // Debug: read back some particle positions to verify they're valid
+    const debugParticles = this.readback(10);
+    console.log('Sample particle positions:', debugParticles);
       
     } catch (error) {
       this.dispose();
@@ -411,8 +423,14 @@ export default class PlanA {
     gl.bufferData(gl.ARRAY_BUFFER, particleIndices, gl.STATIC_DRAW);
     
     const a_index = gl.getAttribLocation(this.renderProgram, 'a_index');
-    gl.enableVertexAttribArray(a_index);
-    gl.vertexAttribPointer(a_index, 1, gl.FLOAT, false, 0, 0);
+    console.log('a_index attribute location:', a_index);
+    
+    if (a_index >= 0) {
+      gl.enableVertexAttribArray(a_index);
+      gl.vertexAttribPointer(a_index, 1, gl.FLOAT, false, 0, 0);
+    } else {
+      console.error('Failed to get a_index attribute location');
+    }
     
     gl.bindVertexArray(null);
   }
@@ -538,6 +556,12 @@ export default class PlanA {
     
     gl.bindVertexArray(this.particleVAO);
     gl.drawArrays(gl.POINTS, 0, this.options.particleCount);
+    
+    // Check for GL errors
+    const error = gl.getError();
+    if (error !== gl.NO_ERROR) {
+      console.error('WebGL error during render:', error);
+    }
     
     gl.disable(gl.BLEND);
     gl.bindVertexArray(null);
@@ -680,28 +704,60 @@ export default class PlanA {
       if (this.renderer && this.scene) {
         this.renderToThreeJS();
       }
+    } else if (this.threeMesh) {
+      // Animate fallback particles - now dynamic with GPU simulation
+      this.animateFallbackParticles();
+    }
+    
+    // Create fallback if custom rendering isn't working - do this immediately
+    if (this.isInitialized && !this.threeMesh && this.scene && this.frameCount === 1) {
+      console.log('Creating Three.js particle rendering immediately');
+      this.createFallbackFromGPU();
     }
   }
 
   renderToThreeJS() {
     // This method integrates with Three.js rendering
-    // For now, we use the direct WebGL rendering approach
-    // More advanced integration could create Three.js materials that sample our textures
+    if (!this.renderer || !this.scene) return;
     
-    if (!this.renderer) return;
+    // Find the active camera
+    let camera = null;
     
-    // Get camera matrices
-    const camera = this.renderer.info?.render?.calls > 0 ? 
-      (this.scene.children.find(obj => obj.isCamera) || this.renderer.xr?.getCamera()) : null;
+    // Try to get camera from Three.js scene
+    this.scene.traverse((obj) => {
+      if (obj.isCamera && !camera) {
+        camera = obj;
+      }
+    });
+    
+    // Fallback: try to get from renderer info or create a default perspective camera
+    if (!camera) {
+      camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+      camera.position.set(0, 0, 5);
+    }
     
     if (camera) {
+      // Update camera matrices
+      camera.updateMatrixWorld();
       const projectionMatrix = camera.projectionMatrix;
       const viewMatrix = camera.matrixWorldInverse;
-      const projectionView = projectionMatrix.clone().multiply(viewMatrix);
+      const projectionView = new THREE.Matrix4().multiplyMatrices(projectionMatrix, viewMatrix);
       
-      // Save Three.js state
+      // Save Three.js WebGL state
       const oldViewport = this.gl.getParameter(this.gl.VIEWPORT);
       const oldProgram = this.gl.getParameter(this.gl.CURRENT_PROGRAM);
+      const oldVAO = this.gl.getParameter(this.gl.VERTEX_ARRAY_BINDING);
+      const oldFramebuffer = this.gl.getParameter(this.gl.FRAMEBUFFER_BINDING);
+      const oldDepthTest = this.gl.getParameter(this.gl.DEPTH_TEST);
+      const oldBlend = this.gl.getParameter(this.gl.BLEND);
+      
+      // Ensure we're rendering to the main framebuffer with proper state
+      this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, null);
+      this.gl.viewport(0, 0, this.renderer.domElement.width, this.renderer.domElement.height);
+      
+      // Clear depth buffer to ensure particles render on top
+      this.gl.clear(this.gl.DEPTH_BUFFER_BIT);
+      this.gl.disable(this.gl.DEPTH_TEST);
       
       // Render our particles
       this.render(projectionView.elements);
@@ -709,6 +765,10 @@ export default class PlanA {
       // Restore Three.js state
       this.gl.viewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
       this.gl.useProgram(oldProgram);
+      this.gl.bindVertexArray(oldVAO);
+      this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, oldFramebuffer);
+      if (oldDepthTest) this.gl.enable(this.gl.DEPTH_TEST);
+      if (!oldBlend) this.gl.disable(this.gl.BLEND);
     }
   }
 
@@ -742,6 +802,76 @@ export default class PlanA {
     this._objects.push(this.threeMesh);
     
     console.log(`Added ${count} fallback particles to scene`);
+  }
+
+  animateFallbackParticles() {
+    if (!this.threeMesh || !this.isInitialized) return;
+    
+    // Update particle positions from GPU simulation every few frames
+    if (this.frameCount % 3 === 0) {
+      try {
+        const particles = this.readback(Math.min(15000, this.options.particleCount));
+        const positions = this.threeMesh.geometry.attributes.position.array;
+        
+        for (let i = 0; i < Math.min(particles.length, positions.length / 3); i++) {
+          const p = particles[i];
+          positions[i * 3 + 0] = p.x;
+          positions[i * 3 + 1] = p.y;
+          positions[i * 3 + 2] = p.z;
+        }
+        
+        this.threeMesh.geometry.attributes.position.needsUpdate = true;
+      } catch (error) {
+        // Silently continue with static positions if readback fails
+      }
+    }
+  }
+
+  createFallbackFromGPU() {
+    if (!this.scene || this.threeMesh) return;
+    
+    console.log('Creating fallback Three.js points from GPU data');
+    
+    try {
+      // Read current particle positions from GPU
+      const particles = this.readback(Math.min(15000, this.options.particleCount));
+      const geometry = new THREE.BufferGeometry();
+      const positions = new Float32Array(particles.length * 3);
+      const colors = new Float32Array(particles.length * 3);
+      
+      for (let i = 0; i < particles.length; i++) {
+        const p = particles[i];
+        positions[i * 3 + 0] = p.x;
+        positions[i * 3 + 1] = p.y;
+        positions[i * 3 + 2] = p.z;
+        
+        // Color based on position for variety
+        colors[i * 3 + 0] = 0.5 + Math.abs(p.x) / 10.0; // red
+        colors[i * 3 + 1] = 0.5 + Math.abs(p.y) / 10.0; // green
+        colors[i * 3 + 2] = 0.5 + Math.abs(p.z) / 10.0; // blue
+      }
+      
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+      
+      const material = new THREE.PointsMaterial({ 
+        size: 0.03,
+        transparent: true,
+        opacity: 0.9,
+        vertexColors: true,
+        sizeAttenuation: true
+      });
+      
+      this.threeMesh = new THREE.Points(geometry, material);
+      this.scene.add(this.threeMesh);
+      this._objects.push(this.threeMesh);
+      
+      console.log(`Added ${particles.length} GPU-driven fallback particles to scene`);
+      console.log('Sample positions:', particles.slice(0, 5));
+    } catch (error) {
+      console.error('Failed to create GPU fallback particles:', error);
+      this.createFallbackPoints();
+    }
   }
 
   // Legacy compatibility methods

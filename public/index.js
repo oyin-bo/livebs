@@ -26693,7 +26693,9 @@ void main() {
     }
   };
   function generateParticlePositions(count, seed = 12345, worldBounds = { min: [-10, -10, -10], max: [10, 10, 10] }) {
-    const positions = new Float32Array(count * 4);
+    const textureSize = Math.ceil(Math.sqrt(count));
+    const totalTexels = textureSize * textureSize;
+    const positions = new Float32Array(totalTexels * 4);
     let rng = seed;
     function random() {
       rng = (rng * 1664525 + 1013904223) % 4294967296;
@@ -26706,10 +26708,19 @@ void main() {
       positions[base + 2] = worldBounds.min[2] + random() * (worldBounds.max[2] - worldBounds.min[2]);
       positions[base + 3] = 1;
     }
+    for (let i = count; i < totalTexels; i++) {
+      const base = i * 4;
+      positions[base + 0] = 0;
+      positions[base + 1] = 0;
+      positions[base + 2] = 0;
+      positions[base + 3] = 0;
+    }
     return positions;
   }
   function generateParticleVelocities(count, seed = 54321) {
-    const velocities = new Float32Array(count * 4);
+    const textureSize = Math.ceil(Math.sqrt(count));
+    const totalTexels = textureSize * textureSize;
+    const velocities = new Float32Array(totalTexels * 4);
     let rng = seed;
     function random() {
       rng = (rng * 1664525 + 1013904223) % 4294967296;
@@ -26720,6 +26731,13 @@ void main() {
       velocities[base + 0] = (random() - 0.5) * 2;
       velocities[base + 1] = (random() - 0.5) * 2;
       velocities[base + 2] = (random() - 0.5) * 2;
+      velocities[base + 3] = 0;
+    }
+    for (let i = count; i < totalTexels; i++) {
+      const base = i * 4;
+      velocities[base + 0] = 0;
+      velocities[base + 1] = 0;
+      velocities[base + 2] = 0;
       velocities[base + 3] = 0;
     }
     return velocities;
@@ -26741,9 +26759,18 @@ void main() {
      * Initialize GPU timing if available
      */
     initGPUTiming(gl) {
-      this.gpuTimerExt = gl.getExtension("EXT_disjoint_timer_query_webgl2");
-      if (this.gpuTimerExt) {
-        console.log("GPU timing enabled");
+      try {
+        const ext = gl.getExtension("EXT_disjoint_timer_query_webgl2");
+        if (ext && typeof ext.createQueryEXT === "function" && typeof ext.deleteQueryEXT === "function" && typeof ext.beginQueryEXT === "function" && typeof ext.endQueryEXT === "function" && typeof ext.queryCounterEXT === "function" && typeof ext.getQueryObjectEXT === "function" && ext.TIME_ELAPSED_EXT !== void 0) {
+          this.gpuTimerExt = ext;
+          console.log("GPU timing enabled");
+        } else {
+          console.log("GPU timing extension incomplete or unavailable");
+          this.gpuTimerExt = null;
+        }
+      } catch (error) {
+        console.warn("GPU timing initialization failed:", error);
+        this.gpuTimerExt = null;
       }
     }
     /**
@@ -26752,9 +26779,14 @@ void main() {
     beginFrame() {
       this.frameStart = performance.now();
       if (this.gpuTimerExt) {
-        const query = this.gpuTimerExt.createQueryEXT();
-        this.gpuTimerExt.beginQueryEXT(this.gpuTimerExt.TIME_ELAPSED_EXT, query);
-        this.gpuQueries.push({ query, frameCount: this.frameCount });
+        try {
+          const query = this.gpuTimerExt.createQueryEXT();
+          this.gpuTimerExt.beginQueryEXT(this.gpuTimerExt.TIME_ELAPSED_EXT, query);
+          this.gpuQueries.push({ query, frameCount: this.frameCount });
+        } catch (error) {
+          console.warn("GPU timing beginFrame failed:", error);
+          this.gpuTimerExt = null;
+        }
       }
     }
     /**
@@ -26768,7 +26800,12 @@ void main() {
       }
       this.frameCount++;
       if (this.gpuTimerExt) {
-        this.gpuTimerExt.endQueryEXT(this.gpuTimerExt.TIME_ELAPSED_EXT);
+        try {
+          this.gpuTimerExt.endQueryEXT(this.gpuTimerExt.TIME_ELAPSED_EXT);
+        } catch (error) {
+          console.warn("GPU timing endFrame failed:", error);
+          this.gpuTimerExt = null;
+        }
       }
       this.processGPUQueries();
     }
@@ -26779,14 +26816,25 @@ void main() {
       if (!this.gpuTimerExt) return;
       for (let i = this.gpuQueries.length - 1; i >= 0; i--) {
         const queryInfo = this.gpuQueries[i];
-        if (this.gpuTimerExt.getQueryObjectEXT(queryInfo.query, this.gpuTimerExt.QUERY_RESULT_AVAILABLE_EXT)) {
-          const gpuTime = this.gpuTimerExt.getQueryObjectEXT(queryInfo.query, this.gpuTimerExt.QUERY_RESULT_EXT);
-          this.gpuTimings.push(gpuTime / 1e6);
-          if (this.gpuTimings.length > this.maxFrameHistory) {
-            this.gpuTimings.shift();
+        try {
+          if (this.gpuTimerExt.getQueryObjectEXT(queryInfo.query, this.gpuTimerExt.QUERY_RESULT_AVAILABLE_EXT)) {
+            const gpuTime = this.gpuTimerExt.getQueryObjectEXT(queryInfo.query, this.gpuTimerExt.QUERY_RESULT_EXT);
+            this.gpuTimings.push(gpuTime / 1e6);
+            if (this.gpuTimings.length > this.maxFrameHistory) {
+              this.gpuTimings.shift();
+            }
+            this.gpuTimerExt.deleteQueryEXT(queryInfo.query);
+            this.gpuQueries.splice(i, 1);
           }
-          this.gpuTimerExt.deleteQueryEXT(queryInfo.query);
+        } catch (error) {
+          console.warn("GPU timing query processing failed:", error);
+          try {
+            this.gpuTimerExt.deleteQueryEXT(queryInfo.query);
+          } catch (deleteError) {
+          }
           this.gpuQueries.splice(i, 1);
+          this.gpuTimerExt = null;
+          break;
         }
       }
     }
@@ -26913,7 +26961,15 @@ vec2 indexToUV(int index) {
 vec3 computePairForce(vec3 pos1, vec3 pos2, float mass1, float mass2) {
   vec3 dir = pos2 - pos1;
   float d2 = dot(dir, dir) + SOFTENING;
-  float force = mass1 * mass2 / d2;
+  float distance = sqrt(d2);
+  
+  // Social force with both attraction and repulsion
+  float attraction = mass1 * mass2 / (d2 + 1.0);
+  float repulsion = 0.1 / (distance + 0.1);
+  
+  // Create interesting dynamics: attraction at medium range, repulsion at close range
+  float force = attraction - repulsion * 2.0;
+  
   return force * normalize(dir);
 }
 
@@ -27075,15 +27131,15 @@ void main() {
         this.options = c || {};
       }
       this.options = {
-        particleCount: this.options.particleCount || 1e5,
+        particleCount: this.options.particleCount || 5e4,
         samplingFraction: this.options.samplingFraction || 0.25,
         dt: this.options.dt || 0.016,
         integrationMethod: this.options.integrationMethod || "semi-implicit",
         wrapMode: this.options.wrapMode || "wrap",
-        worldBounds: this.options.worldBounds || { min: [-10, -10, -10], max: [10, 10, 10] },
+        worldBounds: this.options.worldBounds || { min: [-5, -5, -5], max: [5, 5, 5] },
         enableVelocityTexture: this.options.enableVelocityTexture !== false,
         seed: this.options.seed || 12345,
-        pointSize: this.options.pointSize || 2
+        pointSize: this.options.pointSize || 4
       };
       this.isInitialized = false;
       this.frameCount = 0;
@@ -27422,20 +27478,38 @@ ${source}`);
         if (this.renderer && this.scene) {
           this.renderToThreeJS();
         }
+      } else if (this.threeMesh) {
+        this.animateFallbackParticles();
       }
     }
     renderToThreeJS() {
-      if (!this.renderer) return;
-      const camera2 = this.renderer.info?.render?.calls > 0 ? this.scene.children.find((obj) => obj.isCamera) || this.renderer.xr?.getCamera() : null;
+      if (!this.renderer || !this.scene) return;
+      let camera2 = null;
+      this.scene.traverse((obj) => {
+        if (obj.isCamera && !camera2) {
+          camera2 = obj;
+        }
+      });
+      if (!camera2) {
+        camera2 = new PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1e3);
+        camera2.position.set(0, 0, 5);
+      }
       if (camera2) {
+        camera2.updateMatrixWorld();
         const projectionMatrix = camera2.projectionMatrix;
         const viewMatrix = camera2.matrixWorldInverse;
-        const projectionView = projectionMatrix.clone().multiply(viewMatrix);
+        const projectionView = new Matrix4().multiplyMatrices(projectionMatrix, viewMatrix);
         const oldViewport = this.gl.getParameter(this.gl.VIEWPORT);
         const oldProgram = this.gl.getParameter(this.gl.CURRENT_PROGRAM);
+        const oldVAO = this.gl.getParameter(this.gl.VERTEX_ARRAY_BINDING);
+        const oldFramebuffer = this.gl.getParameter(this.gl.FRAMEBUFFER_BINDING);
+        this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, null);
+        this.gl.viewport(0, 0, this.renderer.domElement.width, this.renderer.domElement.height);
         this.render(projectionView.elements);
         this.gl.viewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
         this.gl.useProgram(oldProgram);
+        this.gl.bindVertexArray(oldVAO);
+        this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, oldFramebuffer);
       }
     }
     createFallbackPoints() {
@@ -27460,6 +27534,11 @@ ${source}`);
       this.scene.add(this.threeMesh);
       this._objects.push(this.threeMesh);
       console.log(`Added ${count} fallback particles to scene`);
+    }
+    animateFallbackParticles() {
+      if (!this.threeMesh) return;
+      this.threeMesh.rotation.x += 5e-3;
+      this.threeMesh.rotation.y += 0.01;
     }
     // Legacy compatibility methods
     getFrameStats() {
@@ -27569,6 +27648,7 @@ ${source}`);
   scene.background = new Color(1118481);
   var camera = new PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1e3);
   camera.position.set(0, 0, 5);
+  scene.add(camera);
   var renderer = new WebGLRenderer({ antialias: true });
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.domElement.style.width = "100%";
