@@ -80,3 +80,4 @@ animate();
 
 // Expose switch function for debug
 window.switchPlan = switchPlan;
+window.camera = camera; // Expose camera for Plan M

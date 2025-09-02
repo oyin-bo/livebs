@@ -27617,6 +27617,14 @@ void main() {
   vec4 posData = texture(u_positions, uv);
   vec3 worldPos = posData.xyz;
   
+  // Skip particles that are at origin (unused texels)
+  if (length(worldPos) < 0.001) {
+    gl_Position = vec4(0, 0, -1000, 1); // Move offscreen
+    gl_PointSize = 0.0;
+    v_color = vec3(0);
+    return;
+  }
+  
   gl_Position = u_projectionView * vec4(worldPos, 1.0);
   gl_PointSize = u_pointSize;
   
@@ -27703,8 +27711,9 @@ void main() {
       this.numLevels = Math.min(8, Math.ceil(Math.log2(this.L0Size)) + 1);
       this.textureWidth = Math.ceil(Math.sqrt(this.options.particleCount));
       this.textureHeight = Math.ceil(this.options.particleCount / this.textureWidth);
+      this.actualTextureSize = this.textureWidth * this.textureHeight;
       console.log(`Quadtree: L0=${this.L0Size}x${this.L0Size}, ${this.numLevels} levels`);
-      console.log(`Position texture: ${this.textureWidth}x${this.textureHeight} for ${this.options.particleCount} particles`);
+      console.log(`Position texture: ${this.textureWidth}x${this.textureHeight} for ${this.options.particleCount} particles (${this.actualTextureSize} total texels)`);
     }
     createShaderPrograms() {
       const gl = this.gl;
@@ -27841,7 +27850,7 @@ ${source}`);
       gl.bindVertexArray(null);
     }
     initializeParticles() {
-      const positions = new Float32Array(this.options.particleCount * 4);
+      const positions = new Float32Array(this.actualTextureSize * 4);
       const bounds = this.options.worldBounds;
       const center = [
         (bounds.min[0] + bounds.max[0]) / 2,
@@ -27851,16 +27860,23 @@ ${source}`);
       for (let i = 0; i < this.options.particleCount; i++) {
         const base = i * 4;
         const angle = Math.random() * Math.PI * 2;
-        const radius = Math.random() * 8 + Math.random() * 2;
-        const height = (Math.random() - 0.5) * 4;
+        const radius = Math.random() * 3 + Math.random() * 1;
+        const height = (Math.random() - 0.5) * 2;
         positions[base + 0] = center[0] + Math.cos(angle) * radius;
         positions[base + 1] = center[1] + Math.sin(angle) * radius;
         positions[base + 2] = center[2] + height;
         positions[base + 3] = 1;
       }
+      for (let i = this.options.particleCount; i < this.actualTextureSize; i++) {
+        const base = i * 4;
+        positions[base + 0] = 0;
+        positions[base + 1] = 0;
+        positions[base + 2] = 0;
+        positions[base + 3] = 0;
+      }
       this.uploadTextureData(this.positionTextures.textures[0], positions);
       this.uploadTextureData(this.positionTextures.textures[1], positions);
-      console.log("Particle data initialized");
+      console.log(`Particle data initialized: ${this.options.particleCount} particles in ${this.actualTextureSize} texels`);
     }
     uploadTextureData(texture, data) {
       const gl = this.gl;
@@ -27953,7 +27969,7 @@ ${source}`);
         const u_pointSize = gl.getUniformLocation(this.programs.render, "u_pointSize");
         gl.uniform1i(u_positions, 0);
         gl.uniform2f(u_texSize, this.textureWidth, this.textureHeight);
-        gl.uniform1f(u_pointSize, this.options.pointSize * 2);
+        gl.uniform1f(u_pointSize, this.options.pointSize * 10);
         camera2.updateMatrixWorld();
         camera2.updateProjectionMatrix();
         const projectionMatrix = camera2.projectionMatrix;
@@ -27970,6 +27986,8 @@ ${source}`);
         gl.disable(gl.DEPTH_TEST);
         if (this.frameCount < 3) {
           console.log(`Plan M: Rendered ${this.options.particleCount} particles at frame ${this.frameCount}`);
+          console.log(`Plan M: Camera position:`, camera2.position);
+          console.log(`Plan M: Point size:`, this.options.pointSize * 10);
         }
       } catch (error) {
         console.error("Plan M render error:", error);
@@ -27985,16 +28003,23 @@ ${source}`);
       this.scene.traverse((child) => {
         if (child.isCamera && !camera2) {
           camera2 = child;
-          console.log("Plan M: Found camera in scene:", child.constructor.name);
         }
       });
+      if (!camera2 && this.renderer && this.renderer.domElement && this.renderer.domElement.parentElement) {
+        if (window.camera && window.camera.isCamera) {
+          camera2 = window.camera;
+          console.log("Plan M: Found global camera");
+        }
+      }
       if (!camera2) {
         camera2 = new PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1e3);
-        camera2.position.set(0, 0, 5);
+        camera2.position.set(0, 0, 15);
         camera2.lookAt(0, 0, 0);
         camera2.updateMatrixWorld();
         camera2.updateProjectionMatrix();
         console.log("Plan M: Using fallback camera");
+      } else {
+        console.log("Plan M: Found camera in scene:", camera2.constructor.name);
       }
       return camera2;
     }
@@ -28124,6 +28149,7 @@ ${source}`);
   });
   animate();
   window.switchPlan = switchPlan;
+  window.camera = camera;
 })();
 /*! Bundled license information:
 
