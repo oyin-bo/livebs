@@ -26741,9 +26741,18 @@ void main() {
      * Initialize GPU timing if available
      */
     initGPUTiming(gl) {
-      this.gpuTimerExt = gl.getExtension("EXT_disjoint_timer_query_webgl2");
-      if (this.gpuTimerExt) {
-        console.log("GPU timing enabled");
+      try {
+        const ext = gl.getExtension("EXT_disjoint_timer_query_webgl2");
+        if (ext && typeof ext.createQueryEXT === "function" && typeof ext.deleteQueryEXT === "function" && typeof ext.beginQueryEXT === "function" && typeof ext.endQueryEXT === "function" && typeof ext.queryCounterEXT === "function" && typeof ext.getQueryObjectEXT === "function" && ext.TIME_ELAPSED_EXT !== void 0) {
+          this.gpuTimerExt = ext;
+          console.log("GPU timing enabled");
+        } else {
+          console.log("GPU timing extension incomplete or unavailable");
+          this.gpuTimerExt = null;
+        }
+      } catch (error) {
+        console.warn("GPU timing initialization failed:", error);
+        this.gpuTimerExt = null;
       }
     }
     /**
@@ -26752,9 +26761,14 @@ void main() {
     beginFrame() {
       this.frameStart = performance.now();
       if (this.gpuTimerExt) {
-        const query = this.gpuTimerExt.createQueryEXT();
-        this.gpuTimerExt.beginQueryEXT(this.gpuTimerExt.TIME_ELAPSED_EXT, query);
-        this.gpuQueries.push({ query, frameCount: this.frameCount });
+        try {
+          const query = this.gpuTimerExt.createQueryEXT();
+          this.gpuTimerExt.beginQueryEXT(this.gpuTimerExt.TIME_ELAPSED_EXT, query);
+          this.gpuQueries.push({ query, frameCount: this.frameCount });
+        } catch (error) {
+          console.warn("GPU timing beginFrame failed:", error);
+          this.gpuTimerExt = null;
+        }
       }
     }
     /**
@@ -26768,7 +26782,12 @@ void main() {
       }
       this.frameCount++;
       if (this.gpuTimerExt) {
-        this.gpuTimerExt.endQueryEXT(this.gpuTimerExt.TIME_ELAPSED_EXT);
+        try {
+          this.gpuTimerExt.endQueryEXT(this.gpuTimerExt.TIME_ELAPSED_EXT);
+        } catch (error) {
+          console.warn("GPU timing endFrame failed:", error);
+          this.gpuTimerExt = null;
+        }
       }
       this.processGPUQueries();
     }
@@ -26779,14 +26798,25 @@ void main() {
       if (!this.gpuTimerExt) return;
       for (let i = this.gpuQueries.length - 1; i >= 0; i--) {
         const queryInfo = this.gpuQueries[i];
-        if (this.gpuTimerExt.getQueryObjectEXT(queryInfo.query, this.gpuTimerExt.QUERY_RESULT_AVAILABLE_EXT)) {
-          const gpuTime = this.gpuTimerExt.getQueryObjectEXT(queryInfo.query, this.gpuTimerExt.QUERY_RESULT_EXT);
-          this.gpuTimings.push(gpuTime / 1e6);
-          if (this.gpuTimings.length > this.maxFrameHistory) {
-            this.gpuTimings.shift();
+        try {
+          if (this.gpuTimerExt.getQueryObjectEXT(queryInfo.query, this.gpuTimerExt.QUERY_RESULT_AVAILABLE_EXT)) {
+            const gpuTime = this.gpuTimerExt.getQueryObjectEXT(queryInfo.query, this.gpuTimerExt.QUERY_RESULT_EXT);
+            this.gpuTimings.push(gpuTime / 1e6);
+            if (this.gpuTimings.length > this.maxFrameHistory) {
+              this.gpuTimings.shift();
+            }
+            this.gpuTimerExt.deleteQueryEXT(queryInfo.query);
+            this.gpuQueries.splice(i, 1);
           }
-          this.gpuTimerExt.deleteQueryEXT(queryInfo.query);
+        } catch (error) {
+          console.warn("GPU timing query processing failed:", error);
+          try {
+            this.gpuTimerExt.deleteQueryEXT(queryInfo.query);
+          } catch (deleteError) {
+          }
           this.gpuQueries.splice(i, 1);
+          this.gpuTimerExt = null;
+          break;
         }
       }
     }
@@ -27509,15 +27539,277 @@ ${source}`);
     constructor(scene2, renderer2) {
       this.scene = scene2;
       this.renderer = renderer2;
+      this.gl = renderer2.getContext();
+      this.config = {
+        particleCount: 1e4,
+        // Reasonable count for demo
+        spatialGridSize: 20,
+        spatialResolution: 16,
+        // Smaller 3D texture
+        pointSize: 3,
+        dt: 0.016,
+        worldBounds: {
+          min: new Vector3(-10, -10, -10),
+          max: new Vector3(10, 10, 10)
+        }
+      };
       this._objects = [];
+      this.frameCount = 0;
+      this.isInitialized = false;
+      this.stats = {
+        highFidelityCount: 0,
+        mediumFidelityCount: 0,
+        lowFidelityCount: 0
+      };
     }
-    start() {
+    async start() {
+      console.log("Initializing Plan D...", this.config);
+      try {
+        this.checkCapabilities();
+        this.createParticleSystem();
+        this.isInitialized = true;
+        console.log("Plan D initialized successfully");
+      } catch (error) {
+        console.error("Plan D initialization failed:", error);
+        this.fallbackVisualization();
+      }
+    }
+    checkCapabilities() {
+      const gl = this.gl;
+      const capabilities = {
+        webgl2: !!gl.getParameter,
+        float_texture: !!gl.getExtension("EXT_color_buffer_float"),
+        texture_3d: !!gl.TEXTURE_3D,
+        max_texture_size: gl.getParameter(gl.MAX_TEXTURE_SIZE)
+      };
+      console.log("GPU capabilities:", capabilities);
+      if (!capabilities.webgl2) {
+        throw new Error("Plan D requires WebGL2");
+      }
+    }
+    createParticleSystem() {
+      const geometry = new BufferGeometry();
+      const positions = new Float32Array(this.config.particleCount * 3);
+      const colors = new Float32Array(this.config.particleCount * 3);
+      const importance = new Float32Array(this.config.particleCount);
+      for (let i = 0; i < this.config.particleCount; i++) {
+        const cluster = Math.floor(i / (this.config.particleCount / 5));
+        const clusterX = (cluster % 3 - 1) * 8;
+        const clusterY = (Math.floor(cluster / 3) - 1) * 8;
+        const clusterZ = 0;
+        positions[i * 3 + 0] = clusterX + (Math.random() - 0.5) * 4;
+        positions[i * 3 + 1] = clusterY + (Math.random() - 0.5) * 4;
+        positions[i * 3 + 2] = clusterZ + (Math.random() - 0.5) * 4;
+        const dist = Math.sqrt(positions[i * 3] ** 2 + positions[i * 3 + 1] ** 2 + positions[i * 3 + 2] ** 2);
+        if (dist < 3) {
+          importance[i] = 0;
+          this.stats.highFidelityCount++;
+          colors[i * 3 + 0] = 0.2;
+          colors[i * 3 + 1] = 0.6;
+          colors[i * 3 + 2] = 1;
+        } else if (dist < 8) {
+          importance[i] = 1;
+          this.stats.mediumFidelityCount++;
+          colors[i * 3 + 0] = 0.2;
+          colors[i * 3 + 1] = 1;
+          colors[i * 3 + 2] = 0.4;
+        } else {
+          importance[i] = 2;
+          this.stats.lowFidelityCount++;
+          colors[i * 3 + 0] = 1;
+          colors[i * 3 + 1] = 0.4;
+          colors[i * 3 + 2] = 0.2;
+        }
+      }
+      this.particleData = {
+        positions: positions.slice(),
+        velocities: new Float32Array(this.config.particleCount * 3),
+        importance,
+        forces: new Float32Array(this.config.particleCount * 3)
+      };
+      for (let i = 0; i < this.config.particleCount * 3; i++) {
+        this.particleData.velocities[i] = (Math.random() - 0.5) * 0.1;
+      }
+      geometry.setAttribute("position", new BufferAttribute(positions, 3));
+      geometry.setAttribute("color", new BufferAttribute(colors, 3));
+      const material = new PointsMaterial({
+        size: this.config.pointSize,
+        vertexColors: true,
+        transparent: true,
+        blending: AdditiveBlending,
+        sizeAttenuation: false
+      });
+      this.particleSystem = new Points(geometry, material);
+      this.scene.add(this.particleSystem);
+      this._objects.push(this.particleSystem);
+      console.log(`Particle system created: ${this.stats.highFidelityCount} high, ${this.stats.mediumFidelityCount} medium, ${this.stats.lowFidelityCount} low fidelity particles`);
+    }
+    update() {
+      if (!this.isInitialized) return;
+      this.frameCount++;
+      try {
+        this.calculateMultiResolutionForces();
+        this.updatePhysics();
+        this.updateRendering();
+        if (this.frameCount % 120 === 0) {
+          this.updateImportanceClassification();
+        }
+      } catch (error) {
+        console.error("Plan D update error:", error);
+      }
+    }
+    calculateMultiResolutionForces() {
+      const positions = this.particleData.positions;
+      const forces = this.particleData.forces;
+      const importance = this.particleData.importance;
+      forces.fill(0);
+      for (let i = 0; i < this.config.particleCount; i++) {
+        const px = positions[i * 3];
+        const py = positions[i * 3 + 1];
+        const pz = positions[i * 3 + 2];
+        const imp = importance[i];
+        let fx = 0, fy = 0, fz = 0;
+        if (imp === 0) {
+          const sampleCount = Math.min(200, this.config.particleCount / 2);
+          for (let s = 0; s < sampleCount; s++) {
+            const j = Math.floor(Math.random() * this.config.particleCount);
+            if (i === j) continue;
+            const dx = positions[j * 3] - px;
+            const dy = positions[j * 3 + 1] - py;
+            const dz = positions[j * 3 + 2] - pz;
+            const d2 = dx * dx + dy * dy + dz * dz + 0.01;
+            const force = 1e-3 / d2;
+            fx += dx * force;
+            fy += dy * force;
+            fz += dz * force;
+          }
+        } else if (imp === 1) {
+          const sampleCount = Math.min(50, this.config.particleCount / 10);
+          for (let s = 0; s < sampleCount; s++) {
+            const j = Math.floor(Math.random() * this.config.particleCount);
+            if (i === j) continue;
+            const dx = positions[j * 3] - px;
+            const dy = positions[j * 3 + 1] - py;
+            const dz = positions[j * 3 + 2] - pz;
+            const d2 = dx * dx + dy * dy + dz * dz + 0.01;
+            const force = 1e-3 / d2;
+            fx += dx * force * 0.5;
+            fy += dy * force * 0.5;
+            fz += dz * force * 0.5;
+          }
+          fx += -px * 1e-4;
+          fy += -py * 1e-4;
+          fz += -pz * 1e-4;
+        } else {
+          fx = -px * 1e-4;
+          fy = -py * 1e-4;
+          fz = -pz * 1e-4;
+        }
+        forces[i * 3] = fx;
+        forces[i * 3 + 1] = fy;
+        forces[i * 3 + 2] = fz;
+      }
+    }
+    updatePhysics() {
+      const positions = this.particleData.positions;
+      const velocities = this.particleData.velocities;
+      const forces = this.particleData.forces;
+      const dt = this.config.dt;
+      for (let i = 0; i < this.config.particleCount; i++) {
+        const mass = 1;
+        velocities[i * 3] += forces[i * 3] / mass * dt;
+        velocities[i * 3 + 1] += forces[i * 3 + 1] / mass * dt;
+        velocities[i * 3 + 2] += forces[i * 3 + 2] / mass * dt;
+        velocities[i * 3] *= 0.995;
+        velocities[i * 3 + 1] *= 0.995;
+        velocities[i * 3 + 2] *= 0.995;
+        const maxVel = 5;
+        velocities[i * 3] = Math.max(-maxVel, Math.min(maxVel, velocities[i * 3]));
+        velocities[i * 3 + 1] = Math.max(-maxVel, Math.min(maxVel, velocities[i * 3 + 1]));
+        velocities[i * 3 + 2] = Math.max(-maxVel, Math.min(maxVel, velocities[i * 3 + 2]));
+        positions[i * 3] += velocities[i * 3] * dt;
+        positions[i * 3 + 1] += velocities[i * 3 + 1] * dt;
+        positions[i * 3 + 2] += velocities[i * 3 + 2] * dt;
+        const bounds = 15;
+        if (positions[i * 3] < -bounds) positions[i * 3] = bounds;
+        if (positions[i * 3] > bounds) positions[i * 3] = -bounds;
+        if (positions[i * 3 + 1] < -bounds) positions[i * 3 + 1] = bounds;
+        if (positions[i * 3 + 1] > bounds) positions[i * 3 + 1] = -bounds;
+        if (positions[i * 3 + 2] < -bounds) positions[i * 3 + 2] = bounds;
+        if (positions[i * 3 + 2] > bounds) positions[i * 3 + 2] = -bounds;
+      }
+    }
+    updateRendering() {
+      if (this.particleSystem) {
+        const positionAttribute = this.particleSystem.geometry.attributes.position;
+        positionAttribute.array.set(this.particleData.positions);
+        positionAttribute.needsUpdate = true;
+        const colors = this.particleSystem.geometry.attributes.color.array;
+        const time = this.frameCount * 0.01;
+        for (let i = 0; i < this.config.particleCount; i++) {
+          const imp = this.particleData.importance[i];
+          const brightness = 0.8 + 0.2 * Math.sin(time + i * 0.1);
+          if (imp === 0) {
+            colors[i * 3] = 0.2 * brightness;
+            colors[i * 3 + 1] = 0.6 * brightness;
+            colors[i * 3 + 2] = 1 * brightness;
+          } else if (imp === 1) {
+            colors[i * 3] = 0.2 * brightness;
+            colors[i * 3 + 1] = 1 * brightness;
+            colors[i * 3 + 2] = 0.4 * brightness;
+          } else {
+            colors[i * 3] = 1 * brightness;
+            colors[i * 3 + 1] = 0.4 * brightness;
+            colors[i * 3 + 2] = 0.2 * brightness;
+          }
+        }
+        this.particleSystem.geometry.attributes.color.needsUpdate = true;
+      }
+    }
+    updateImportanceClassification() {
+      const positions = this.particleData.positions;
+      const velocities = this.particleData.velocities;
+      const importance = this.particleData.importance;
+      this.stats = { highFidelityCount: 0, mediumFidelityCount: 0, lowFidelityCount: 0 };
+      for (let i = 0; i < this.config.particleCount; i++) {
+        const px = positions[i * 3];
+        const py = positions[i * 3 + 1];
+        const pz = positions[i * 3 + 2];
+        const vx = velocities[i * 3];
+        const vy = velocities[i * 3 + 1];
+        const vz = velocities[i * 3 + 2];
+        const dist = Math.sqrt(px * px + py * py + pz * pz);
+        const motion = Math.sqrt(vx * vx + vy * vy + vz * vz);
+        const score = 1 / Math.max(dist, 1) + motion * 10;
+        if (score > 0.5) {
+          importance[i] = 0;
+          this.stats.highFidelityCount++;
+        } else if (score > 0.1) {
+          importance[i] = 1;
+          this.stats.mediumFidelityCount++;
+        } else {
+          importance[i] = 2;
+          this.stats.lowFidelityCount++;
+        }
+      }
+      console.log(`Importance updated: ${this.stats.highFidelityCount} high, ${this.stats.mediumFidelityCount} medium, ${this.stats.lowFidelityCount} low`);
+    }
+    fallbackVisualization() {
+      console.log("Using Plan D fallback visualization");
       const rings = new Group();
       for (let i = 1; i <= 5; i++) {
         const r = i * 0.5;
         const seg = 64;
         const geo = new RingGeometry(r - 0.02, r + 0.02, seg);
-        const mat = new MeshBasicMaterial({ color: new Color().setHSL(i / 6, 0.7, 0.5), side: DoubleSide });
+        let color;
+        if (i <= 2) {
+          color = new Color(4491519);
+        } else if (i <= 3) {
+          color = new Color(4521864);
+        } else {
+          color = new Color(16729224);
+        }
+        const mat = new MeshBasicMaterial({ color, side: DoubleSide });
         const mesh = new Mesh(geo, mat);
         mesh.rotation.x = -Math.PI / 2;
         rings.add(mesh);
@@ -27528,8 +27820,8 @@ ${source}`);
     stop() {
       this._objects.forEach((o) => this.scene.remove(o));
       this._objects = [];
-    }
-    update() {
+      this.isInitialized = false;
+      console.log("Plan D stopped");
     }
   };
 
