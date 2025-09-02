@@ -469,7 +469,10 @@ export default class PlanM {
     
     // Get camera for projection matrix
     const camera = this.getCameraFromScene();
-    if (!camera) return;
+    if (!camera) {
+      console.warn('Plan M: No camera found for rendering');
+      return;
+    }
     
     const gl = this.gl;
     
@@ -478,65 +481,86 @@ export default class PlanM {
     const oldProgram = gl.getParameter(gl.CURRENT_PROGRAM);
     const oldFramebuffer = gl.getParameter(gl.FRAMEBUFFER_BINDING);
     
-    // Use our render program
-    gl.useProgram(this.programs.render);
-    
-    // Bind default framebuffer (screen)
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
-    
-    // Bind particle positions
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.positionTextures.getCurrentTexture());
-    
-    // Set uniforms
-    const u_positions = gl.getUniformLocation(this.programs.render, 'u_positions');
-    const u_texSize = gl.getUniformLocation(this.programs.render, 'u_texSize');
-    const u_projectionView = gl.getUniformLocation(this.programs.render, 'u_projectionView');
-    const u_pointSize = gl.getUniformLocation(this.programs.render, 'u_pointSize');
-    
-    gl.uniform1i(u_positions, 0);
-    gl.uniform2f(u_texSize, this.textureWidth, this.textureHeight);
-    gl.uniform1f(u_pointSize, this.options.pointSize);
-    
-    // Calculate projection-view matrix
-    const projectionMatrix = camera.projectionMatrix;
-    const viewMatrix = camera.matrixWorldInverse;
-    const projectionView = projectionMatrix.clone().multiply(viewMatrix);
-    gl.uniformMatrix4fv(u_projectionView, false, projectionView.elements);
-    
-    // Enable blending for particles
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    
-    // Render particles
-    gl.bindVertexArray(this.particleVAO);
-    gl.drawArrays(gl.POINTS, 0, this.options.particleCount);
-    gl.bindVertexArray(null);
-    
-    gl.disable(gl.BLEND);
-    
-    // Restore WebGL state
-    gl.viewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
-    gl.useProgram(oldProgram);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, oldFramebuffer);
+    try {
+      // Use our render program
+      gl.useProgram(this.programs.render);
+      
+      // Bind default framebuffer (screen)
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+      
+      // Bind particle positions
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.positionTextures.getCurrentTexture());
+      
+      // Set uniforms
+      const u_positions = gl.getUniformLocation(this.programs.render, 'u_positions');
+      const u_texSize = gl.getUniformLocation(this.programs.render, 'u_texSize');
+      const u_projectionView = gl.getUniformLocation(this.programs.render, 'u_projectionView');
+      const u_pointSize = gl.getUniformLocation(this.programs.render, 'u_pointSize');
+      
+      gl.uniform1i(u_positions, 0);
+      gl.uniform2f(u_texSize, this.textureWidth, this.textureHeight);
+      gl.uniform1f(u_pointSize, this.options.pointSize * 2); // Make points larger
+      
+      // Calculate projection-view matrix
+      camera.updateMatrixWorld();
+      camera.updateProjectionMatrix();
+      const projectionMatrix = camera.projectionMatrix;
+      const viewMatrix = camera.matrixWorldInverse;
+      const projectionView = projectionMatrix.clone().multiply(viewMatrix);
+      gl.uniformMatrix4fv(u_projectionView, false, projectionView.elements);
+      
+      // Enable blending for particles
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.enable(gl.DEPTH_TEST);
+      
+      // Render particles
+      gl.bindVertexArray(this.particleVAO);
+      gl.drawArrays(gl.POINTS, 0, this.options.particleCount);
+      gl.bindVertexArray(null);
+      
+      gl.disable(gl.BLEND);
+      gl.disable(gl.DEPTH_TEST);
+      
+      // Debug: Log on first few frames
+      if (this.frameCount < 3) {
+        console.log(`Plan M: Rendered ${this.options.particleCount} particles at frame ${this.frameCount}`);
+      }
+      
+    } catch (error) {
+      console.error('Plan M render error:', error);
+    } finally {
+      // Restore WebGL state
+      gl.viewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
+      gl.useProgram(oldProgram);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, oldFramebuffer);
+    }
   }
 
   getCameraFromScene() {
     if (!this.scene) return null;
     
-    // Find camera in scene
-    for (let child of this.scene.children) {
-      if (child.isCamera) {
-        return child;
+    // Find camera in scene - check all children recursively
+    let camera = null;
+    this.scene.traverse((child) => {
+      if (child.isCamera && !camera) {
+        camera = child;
+        console.log('Plan M: Found camera in scene:', child.constructor.name);
       }
+    });
+    
+    // If no camera found, create one that should work
+    if (!camera) {
+      camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+      camera.position.set(0, 0, 5);
+      camera.lookAt(0, 0, 0);
+      camera.updateMatrixWorld();
+      camera.updateProjectionMatrix();
+      console.log('Plan M: Using fallback camera');
     }
     
-    // Fallback: create a simple camera
-    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
-    camera.position.set(0, 0, 5);
-    camera.updateMatrixWorld();
-    camera.updateProjectionMatrix();
     return camera;
   }
 

@@ -27933,48 +27933,69 @@ ${source}`);
     renderToThreeJS() {
       if (!this.renderer || !this.scene) return;
       const camera2 = this.getCameraFromScene();
-      if (!camera2) return;
+      if (!camera2) {
+        console.warn("Plan M: No camera found for rendering");
+        return;
+      }
       const gl = this.gl;
       const oldViewport = gl.getParameter(gl.VIEWPORT);
       const oldProgram = gl.getParameter(gl.CURRENT_PROGRAM);
       const oldFramebuffer = gl.getParameter(gl.FRAMEBUFFER_BINDING);
-      gl.useProgram(this.programs.render);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, this.positionTextures.getCurrentTexture());
-      const u_positions = gl.getUniformLocation(this.programs.render, "u_positions");
-      const u_texSize = gl.getUniformLocation(this.programs.render, "u_texSize");
-      const u_projectionView = gl.getUniformLocation(this.programs.render, "u_projectionView");
-      const u_pointSize = gl.getUniformLocation(this.programs.render, "u_pointSize");
-      gl.uniform1i(u_positions, 0);
-      gl.uniform2f(u_texSize, this.textureWidth, this.textureHeight);
-      gl.uniform1f(u_pointSize, this.options.pointSize);
-      const projectionMatrix = camera2.projectionMatrix;
-      const viewMatrix = camera2.matrixWorldInverse;
-      const projectionView = projectionMatrix.clone().multiply(viewMatrix);
-      gl.uniformMatrix4fv(u_projectionView, false, projectionView.elements);
-      gl.enable(gl.BLEND);
-      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-      gl.bindVertexArray(this.particleVAO);
-      gl.drawArrays(gl.POINTS, 0, this.options.particleCount);
-      gl.bindVertexArray(null);
-      gl.disable(gl.BLEND);
-      gl.viewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
-      gl.useProgram(oldProgram);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, oldFramebuffer);
+      try {
+        gl.useProgram(this.programs.render);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, this.positionTextures.getCurrentTexture());
+        const u_positions = gl.getUniformLocation(this.programs.render, "u_positions");
+        const u_texSize = gl.getUniformLocation(this.programs.render, "u_texSize");
+        const u_projectionView = gl.getUniformLocation(this.programs.render, "u_projectionView");
+        const u_pointSize = gl.getUniformLocation(this.programs.render, "u_pointSize");
+        gl.uniform1i(u_positions, 0);
+        gl.uniform2f(u_texSize, this.textureWidth, this.textureHeight);
+        gl.uniform1f(u_pointSize, this.options.pointSize * 2);
+        camera2.updateMatrixWorld();
+        camera2.updateProjectionMatrix();
+        const projectionMatrix = camera2.projectionMatrix;
+        const viewMatrix = camera2.matrixWorldInverse;
+        const projectionView = projectionMatrix.clone().multiply(viewMatrix);
+        gl.uniformMatrix4fv(u_projectionView, false, projectionView.elements);
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.enable(gl.DEPTH_TEST);
+        gl.bindVertexArray(this.particleVAO);
+        gl.drawArrays(gl.POINTS, 0, this.options.particleCount);
+        gl.bindVertexArray(null);
+        gl.disable(gl.BLEND);
+        gl.disable(gl.DEPTH_TEST);
+        if (this.frameCount < 3) {
+          console.log(`Plan M: Rendered ${this.options.particleCount} particles at frame ${this.frameCount}`);
+        }
+      } catch (error) {
+        console.error("Plan M render error:", error);
+      } finally {
+        gl.viewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
+        gl.useProgram(oldProgram);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, oldFramebuffer);
+      }
     }
     getCameraFromScene() {
       if (!this.scene) return null;
-      for (let child of this.scene.children) {
-        if (child.isCamera) {
-          return child;
+      let camera2 = null;
+      this.scene.traverse((child) => {
+        if (child.isCamera && !camera2) {
+          camera2 = child;
+          console.log("Plan M: Found camera in scene:", child.constructor.name);
         }
+      });
+      if (!camera2) {
+        camera2 = new PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1e3);
+        camera2.position.set(0, 0, 5);
+        camera2.lookAt(0, 0, 0);
+        camera2.updateMatrixWorld();
+        camera2.updateProjectionMatrix();
+        console.log("Plan M: Using fallback camera");
       }
-      const camera2 = new PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1e3);
-      camera2.position.set(0, 0, 5);
-      camera2.updateMatrixWorld();
-      camera2.updateProjectionMatrix();
       return camera2;
     }
     createFallbackVisualization() {
