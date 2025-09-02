@@ -27543,14 +27543,17 @@ ${source}`);
       this.config = {
         particleCount: 1e4,
         // Reasonable count for demo
-        spatialGridSize: 20,
+        spatialGridSize: 50,
+        // Larger spatial grid
         spatialResolution: 16,
         // Smaller 3D texture
-        pointSize: 3,
+        pointSize: 12,
+        // Larger points for better visibility
         dt: 0.016,
         worldBounds: {
-          min: new Vector3(-10, -10, -10),
-          max: new Vector3(10, 10, 10)
+          min: new Vector3(-25, -25, -25),
+          // Larger bounds
+          max: new Vector3(25, 25, 25)
         }
       };
       this._objects = [];
@@ -27594,20 +27597,20 @@ ${source}`);
       const importance = new Float32Array(this.config.particleCount);
       for (let i = 0; i < this.config.particleCount; i++) {
         const cluster = Math.floor(i / (this.config.particleCount / 5));
-        const clusterX = (cluster % 3 - 1) * 8;
-        const clusterY = (Math.floor(cluster / 3) - 1) * 8;
+        const clusterX = (cluster % 3 - 1) * 20;
+        const clusterY = (Math.floor(cluster / 3) - 1) * 20;
         const clusterZ = 0;
-        positions[i * 3 + 0] = clusterX + (Math.random() - 0.5) * 4;
-        positions[i * 3 + 1] = clusterY + (Math.random() - 0.5) * 4;
-        positions[i * 3 + 2] = clusterZ + (Math.random() - 0.5) * 4;
+        positions[i * 3 + 0] = clusterX + (Math.random() - 0.5) * 12;
+        positions[i * 3 + 1] = clusterY + (Math.random() - 0.5) * 12;
+        positions[i * 3 + 2] = clusterZ + (Math.random() - 0.5) * 12;
         const dist = Math.sqrt(positions[i * 3] ** 2 + positions[i * 3 + 1] ** 2 + positions[i * 3 + 2] ** 2);
-        if (dist < 3) {
+        if (dist < 8) {
           importance[i] = 0;
           this.stats.highFidelityCount++;
           colors[i * 3 + 0] = 0.2;
           colors[i * 3 + 1] = 0.6;
           colors[i * 3 + 2] = 1;
-        } else if (dist < 8) {
+        } else if (dist < 20) {
           importance[i] = 1;
           this.stats.mediumFidelityCount++;
           colors[i * 3 + 0] = 0.2;
@@ -27637,7 +27640,8 @@ ${source}`);
         vertexColors: true,
         transparent: true,
         blending: AdditiveBlending,
-        sizeAttenuation: false
+        sizeAttenuation: true
+        // Enable size attenuation for proper distance scaling
       });
       this.particleSystem = new Points(geometry, material);
       this.scene.add(this.particleSystem);
@@ -27730,7 +27734,7 @@ ${source}`);
         positions[i * 3] += velocities[i * 3] * dt;
         positions[i * 3 + 1] += velocities[i * 3 + 1] * dt;
         positions[i * 3 + 2] += velocities[i * 3 + 2] * dt;
-        const bounds = 15;
+        const bounds = 30;
         if (positions[i * 3] < -bounds) positions[i * 3] = bounds;
         if (positions[i * 3] > bounds) positions[i * 3] = -bounds;
         if (positions[i * 3 + 1] < -bounds) positions[i * 3 + 1] = bounds;
@@ -27781,10 +27785,10 @@ ${source}`);
         const dist = Math.sqrt(px * px + py * py + pz * pz);
         const motion = Math.sqrt(vx * vx + vy * vy + vz * vz);
         const score = 1 / Math.max(dist, 1) + motion * 10;
-        if (score > 0.5) {
+        if (score > 0.2) {
           importance[i] = 0;
           this.stats.highFidelityCount++;
-        } else if (score > 0.1) {
+        } else if (score > 0.05) {
           importance[i] = 1;
           this.stats.mediumFidelityCount++;
         } else {
@@ -27860,7 +27864,7 @@ ${source}`);
   var scene = new Scene();
   scene.background = new Color(1118481);
   var camera = new PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1e3);
-  camera.position.set(0, 0, 5);
+  camera.position.set(0, 0, 30);
   var renderer = new WebGLRenderer({ antialias: true });
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.domElement.style.width = "100%";

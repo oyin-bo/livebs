@@ -184,13 +184,13 @@ export default class PlanD {
     // Configuration
     this.config = {
       particleCount: 10000,        // Reasonable count for demo
-      spatialGridSize: 20.0,       
+      spatialGridSize: 50.0,       // Larger spatial grid
       spatialResolution: 16,       // Smaller 3D texture
-      pointSize: 3.0,
+      pointSize: 12.0,             // Larger points for better visibility
       dt: 0.016,
       worldBounds: {
-        min: new THREE.Vector3(-10, -10, -10),
-        max: new THREE.Vector3(10, 10, 10)
+        min: new THREE.Vector3(-25, -25, -25),  // Larger bounds
+        max: new THREE.Vector3(25, 25, 25)
       }
     };
     
@@ -247,25 +247,25 @@ export default class PlanD {
     for (let i = 0; i < this.config.particleCount; i++) {
       // Create clusters for demonstration
       const cluster = Math.floor(i / (this.config.particleCount / 5));
-      const clusterX = (cluster % 3 - 1) * 8;
-      const clusterY = (Math.floor(cluster / 3) - 1) * 8;
+      const clusterX = (cluster % 3 - 1) * 20;  // Larger cluster spacing
+      const clusterY = (Math.floor(cluster / 3) - 1) * 20;
       const clusterZ = 0;
       
       // Position with clustering
-      positions[i * 3 + 0] = clusterX + (Math.random() - 0.5) * 4;
-      positions[i * 3 + 1] = clusterY + (Math.random() - 0.5) * 4;
-      positions[i * 3 + 2] = clusterZ + (Math.random() - 0.5) * 4;
+      positions[i * 3 + 0] = clusterX + (Math.random() - 0.5) * 12;  // Larger cluster spread
+      positions[i * 3 + 1] = clusterY + (Math.random() - 0.5) * 12;
+      positions[i * 3 + 2] = clusterZ + (Math.random() - 0.5) * 12;
       
       // Assign importance based on distance from center
       const dist = Math.sqrt(positions[i * 3] ** 2 + positions[i * 3 + 1] ** 2 + positions[i * 3 + 2] ** 2);
       
-      if (dist < 3) {
+      if (dist < 8) {  // Adjusted thresholds for new scale
         importance[i] = 0; // HIGH
         this.stats.highFidelityCount++;
         colors[i * 3 + 0] = 0.2; // Blue for high importance
         colors[i * 3 + 1] = 0.6;
         colors[i * 3 + 2] = 1.0;
-      } else if (dist < 8) {
+      } else if (dist < 20) {
         importance[i] = 1; // MEDIUM
         this.stats.mediumFidelityCount++;
         colors[i * 3 + 0] = 0.2; // Green for medium importance
@@ -301,7 +301,7 @@ export default class PlanD {
       vertexColors: true,
       transparent: true,
       blending: THREE.AdditiveBlending,
-      sizeAttenuation: false
+      sizeAttenuation: true  // Enable size attenuation for proper distance scaling
     });
     
     this.particleSystem = new THREE.Points(geometry, material);
@@ -435,7 +435,7 @@ export default class PlanD {
       positions[i * 3 + 2] += velocities[i * 3 + 2] * dt;
       
       // Wrap boundaries
-      const bounds = 15;
+      const bounds = 30;  // Larger bounds to match new scale
       if (positions[i * 3] < -bounds) positions[i * 3] = bounds;
       if (positions[i * 3] > bounds) positions[i * 3] = -bounds;
       if (positions[i * 3 + 1] < -bounds) positions[i * 3 + 1] = bounds;
@@ -504,10 +504,10 @@ export default class PlanD {
       const motion = Math.sqrt(vx * vx + vy * vy + vz * vz);
       const score = (1.0 / Math.max(dist, 1.0)) + motion * 10;
       
-      if (score > 0.5) {
+      if (score > 0.2) {  // Adjusted thresholds for new scale
         importance[i] = 0; // HIGH
         this.stats.highFidelityCount++;
-      } else if (score > 0.1) {
+      } else if (score > 0.05) {
         importance[i] = 1; // MEDIUM
         this.stats.mediumFidelityCount++;
       } else {
