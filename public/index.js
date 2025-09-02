@@ -13439,6 +13439,26 @@
       });
     }
   }
+  var CanvasTexture = class extends Texture {
+    /**
+     * Constructs a new texture.
+     *
+     * @param {HTMLCanvasElement} [canvas] - The HTML canvas element.
+     * @param {number} [mapping=Texture.DEFAULT_MAPPING] - The texture mapping.
+     * @param {number} [wrapS=ClampToEdgeWrapping] - The wrapS value.
+     * @param {number} [wrapT=ClampToEdgeWrapping] - The wrapT value.
+     * @param {number} [magFilter=LinearFilter] - The mag filter value.
+     * @param {number} [minFilter=LinearMipmapLinearFilter] - The min filter value.
+     * @param {number} [format=RGBAFormat] - The texture format.
+     * @param {number} [type=UnsignedByteType] - The texture type.
+     * @param {number} [anisotropy=Texture.DEFAULT_ANISOTROPY] - The anisotropy value.
+     */
+    constructor(canvas, mapping, wrapS, wrapT, magFilter, minFilter, format, type, anisotropy) {
+      super(canvas, mapping, wrapS, wrapT, magFilter, minFilter, format, type, anisotropy);
+      this.isCanvasTexture = true;
+      this.needsUpdate = true;
+    }
+  };
   var DepthTexture = class extends Texture {
     /**
      * Constructs a new depth texture.
@@ -27136,10 +27156,10 @@ void main() {
         dt: this.options.dt || 0.016,
         integrationMethod: this.options.integrationMethod || "semi-implicit",
         wrapMode: this.options.wrapMode || "wrap",
-        worldBounds: this.options.worldBounds || { min: [-5, -5, -5], max: [5, 5, 5] },
+        worldBounds: this.options.worldBounds || { min: [-10, -10, -10], max: [10, 10, 10] },
         enableVelocityTexture: this.options.enableVelocityTexture !== false,
         seed: this.options.seed || 12345,
-        pointSize: this.options.pointSize || 4
+        pointSize: this.options.pointSize || 8
       };
       this.isInitialized = false;
       this.frameCount = 0;
@@ -27169,6 +27189,8 @@ void main() {
         this.initializeParticles();
         this.isInitialized = true;
         console.log("Plan A initialized successfully");
+        const debugParticles = this.readback(10);
+        console.log("Sample particle positions:", debugParticles);
       } catch (error) {
         this.dispose();
         throw error;
@@ -27270,8 +27292,13 @@ ${source}`);
       gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
       gl.bufferData(gl.ARRAY_BUFFER, particleIndices, gl.STATIC_DRAW);
       const a_index = gl.getAttribLocation(this.renderProgram, "a_index");
-      gl.enableVertexAttribArray(a_index);
-      gl.vertexAttribPointer(a_index, 1, gl.FLOAT, false, 0, 0);
+      console.log("a_index attribute location:", a_index);
+      if (a_index >= 0) {
+        gl.enableVertexAttribArray(a_index);
+        gl.vertexAttribPointer(a_index, 1, gl.FLOAT, false, 0, 0);
+      } else {
+        console.error("Failed to get a_index attribute location");
+      }
       gl.bindVertexArray(null);
     }
     initializeParticles() {
@@ -27371,6 +27398,10 @@ ${source}`);
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       gl.bindVertexArray(this.particleVAO);
       gl.drawArrays(gl.POINTS, 0, this.options.particleCount);
+      const error = gl.getError();
+      if (error !== gl.NO_ERROR) {
+        console.error("WebGL error during render:", error);
+      }
       gl.disable(gl.BLEND);
       gl.bindVertexArray(null);
     }
@@ -27481,6 +27512,10 @@ ${source}`);
       } else if (this.threeMesh) {
         this.animateFallbackParticles();
       }
+      if (this.isInitialized && !this.threeMesh && this.scene && this.frameCount === 1) {
+        console.log("Creating Three.js particle rendering immediately");
+        this.createFallbackFromGPU();
+      }
     }
     renderToThreeJS() {
       if (!this.renderer || !this.scene) return;
@@ -27503,13 +27538,19 @@ ${source}`);
         const oldProgram = this.gl.getParameter(this.gl.CURRENT_PROGRAM);
         const oldVAO = this.gl.getParameter(this.gl.VERTEX_ARRAY_BINDING);
         const oldFramebuffer = this.gl.getParameter(this.gl.FRAMEBUFFER_BINDING);
+        const oldDepthTest = this.gl.getParameter(this.gl.DEPTH_TEST);
+        const oldBlend = this.gl.getParameter(this.gl.BLEND);
         this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, null);
         this.gl.viewport(0, 0, this.renderer.domElement.width, this.renderer.domElement.height);
+        this.gl.clear(this.gl.DEPTH_BUFFER_BIT);
+        this.gl.disable(this.gl.DEPTH_TEST);
         this.render(projectionView.elements);
         this.gl.viewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
         this.gl.useProgram(oldProgram);
         this.gl.bindVertexArray(oldVAO);
         this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, oldFramebuffer);
+        if (oldDepthTest) this.gl.enable(this.gl.DEPTH_TEST);
+        if (!oldBlend) this.gl.disable(this.gl.BLEND);
       }
     }
     createFallbackPoints() {
@@ -27519,16 +27560,19 @@ ${source}`);
       const count = Math.min(1e4, this.options.particleCount);
       const positions = new Float32Array(count * 3);
       for (let i = 0; i < count; i++) {
-        positions[i * 3 + 0] = (Math.random() - 0.5) * 20;
-        positions[i * 3 + 1] = (Math.random() - 0.5) * 20;
-        positions[i * 3 + 2] = (Math.random() - 0.5) * 20;
+        positions[i * 3 + 0] = (Math.random() - 0.5) * 40;
+        positions[i * 3 + 1] = (Math.random() - 0.5) * 40;
+        positions[i * 3 + 2] = (Math.random() - 0.5) * 40;
       }
       geometry.setAttribute("position", new BufferAttribute(positions, 3));
       const material = new PointsMaterial({
         color: 6737151,
-        size: 0.05,
+        size: 2,
         transparent: true,
-        opacity: 0.8
+        opacity: 0.7,
+        sizeAttenuation: false,
+        alphaTest: 0.1,
+        map: this.createCircleTexture()
       });
       this.threeMesh = new Points(geometry, material);
       this.scene.add(this.threeMesh);
@@ -27536,9 +27580,76 @@ ${source}`);
       console.log(`Added ${count} fallback particles to scene`);
     }
     animateFallbackParticles() {
-      if (!this.threeMesh) return;
-      this.threeMesh.rotation.x += 5e-3;
-      this.threeMesh.rotation.y += 0.01;
+      if (!this.threeMesh || !this.isInitialized) return;
+      if (this.frameCount % 3 === 0) {
+        try {
+          const particles = this.readback(Math.min(15e3, this.options.particleCount));
+          const positions = this.threeMesh.geometry.attributes.position.array;
+          for (let i = 0; i < Math.min(particles.length, positions.length / 3); i++) {
+            const p = particles[i];
+            positions[i * 3 + 0] = p.x;
+            positions[i * 3 + 1] = p.y;
+            positions[i * 3 + 2] = p.z;
+          }
+          this.threeMesh.geometry.attributes.position.needsUpdate = true;
+        } catch (error) {
+        }
+      }
+    }
+    createCircleTexture() {
+      const canvas = document.createElement("canvas");
+      canvas.width = 64;
+      canvas.height = 64;
+      const context = canvas.getContext("2d");
+      const gradient = context.createRadialGradient(32, 32, 0, 32, 32, 32);
+      gradient.addColorStop(0, "rgba(255, 255, 255, 1)");
+      gradient.addColorStop(0.2, "rgba(255, 255, 255, 1)");
+      gradient.addColorStop(0.4, "rgba(255, 255, 255, 0.8)");
+      gradient.addColorStop(0.7, "rgba(255, 255, 255, 0.4)");
+      gradient.addColorStop(1, "rgba(255, 255, 255, 0)");
+      context.fillStyle = gradient;
+      context.fillRect(0, 0, 64, 64);
+      const texture = new CanvasTexture(canvas);
+      texture.needsUpdate = true;
+      return texture;
+    }
+    createFallbackFromGPU() {
+      if (!this.scene || this.threeMesh) return;
+      console.log("Creating fallback Three.js points from GPU data");
+      try {
+        const particles = this.readback(Math.min(15e3, this.options.particleCount));
+        const geometry = new BufferGeometry();
+        const positions = new Float32Array(particles.length * 3);
+        const colors = new Float32Array(particles.length * 3);
+        for (let i = 0; i < particles.length; i++) {
+          const p = particles[i];
+          positions[i * 3 + 0] = p.x;
+          positions[i * 3 + 1] = p.y;
+          positions[i * 3 + 2] = p.z;
+          colors[i * 3 + 0] = 0.5 + Math.abs(p.x) / 10;
+          colors[i * 3 + 1] = 0.5 + Math.abs(p.y) / 10;
+          colors[i * 3 + 2] = 0.5 + Math.abs(p.z) / 10;
+        }
+        geometry.setAttribute("position", new BufferAttribute(positions, 3));
+        geometry.setAttribute("color", new BufferAttribute(colors, 3));
+        const material = new PointsMaterial({
+          size: 2,
+          transparent: true,
+          opacity: 0.8,
+          vertexColors: true,
+          sizeAttenuation: false,
+          alphaTest: 0.1,
+          map: this.createCircleTexture()
+        });
+        this.threeMesh = new Points(geometry, material);
+        this.scene.add(this.threeMesh);
+        this._objects.push(this.threeMesh);
+        console.log(`Added ${particles.length} GPU-driven fallback particles to scene`);
+        console.log("Sample positions with values:", particles.slice(0, 5).map((p) => `(${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)})`));
+      } catch (error) {
+        console.error("Failed to create GPU fallback particles:", error);
+        this.createFallbackPoints();
+      }
     }
     // Legacy compatibility methods
     getFrameStats() {
@@ -27646,8 +27757,8 @@ ${source}`);
   var container = document.getElementById("app");
   var scene = new Scene();
   scene.background = new Color(1118481);
-  var camera = new PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1e3);
-  camera.position.set(0, 0, 5);
+  var camera = new PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1e3);
+  camera.position.set(0, 0, 20);
   scene.add(camera);
   var renderer = new WebGLRenderer({ antialias: true });
   renderer.setSize(window.innerWidth, window.innerHeight);

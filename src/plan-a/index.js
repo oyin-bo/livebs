@@ -251,7 +251,7 @@ export default class PlanA {
       dt: this.options.dt || 0.016,
       integrationMethod: this.options.integrationMethod || 'semi-implicit',
       wrapMode: this.options.wrapMode || 'wrap',
-      worldBounds: this.options.worldBounds || { min: [-5, -5, -5], max: [5, 5, 5] },
+      worldBounds: this.options.worldBounds || { min: [-10, -10, -10], max: [10, 10, 10] },
       enableVelocityTexture: this.options.enableVelocityTexture !== false,
       seed: this.options.seed || 12345,
       pointSize: this.options.pointSize || 8.0
@@ -783,18 +783,21 @@ export default class PlanA {
     
     // Generate random positions
     for (let i = 0; i < count; i++) {
-      positions[i * 3 + 0] = (Math.random() - 0.5) * 20;
-      positions[i * 3 + 1] = (Math.random() - 0.5) * 20;
-      positions[i * 3 + 2] = (Math.random() - 0.5) * 20;
+      positions[i * 3 + 0] = (Math.random() - 0.5) * 40;
+      positions[i * 3 + 1] = (Math.random() - 0.5) * 40;
+      positions[i * 3 + 2] = (Math.random() - 0.5) * 40;
     }
     
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     
     const material = new THREE.PointsMaterial({ 
       color: 0x66ccff, 
-      size: 0.05,
+      size: 2.0,
       transparent: true,
-      opacity: 0.8
+      opacity: 0.7,
+      sizeAttenuation: false,
+      alphaTest: 0.1,
+      map: this.createCircleTexture()
     });
     
     this.threeMesh = new THREE.Points(geometry, material);
@@ -827,6 +830,28 @@ export default class PlanA {
     }
   }
 
+  createCircleTexture() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 64;
+    canvas.height = 64;
+    const context = canvas.getContext('2d');
+    
+    // Create a radial gradient for smooth circular particles
+    const gradient = context.createRadialGradient(32, 32, 0, 32, 32, 32);
+    gradient.addColorStop(0, 'rgba(255, 255, 255, 1)');
+    gradient.addColorStop(0.2, 'rgba(255, 255, 255, 1)');
+    gradient.addColorStop(0.4, 'rgba(255, 255, 255, 0.8)');
+    gradient.addColorStop(0.7, 'rgba(255, 255, 255, 0.4)');
+    gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
+    
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, 64, 64);
+    
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    return texture;
+  }
+
   createFallbackFromGPU() {
     if (!this.scene || this.threeMesh) return;
     
@@ -855,11 +880,13 @@ export default class PlanA {
       geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
       
       const material = new THREE.PointsMaterial({ 
-        size: 0.03,
+        size: 2.0,
         transparent: true,
-        opacity: 0.9,
+        opacity: 0.8,
         vertexColors: true,
-        sizeAttenuation: true
+        sizeAttenuation: false,
+        alphaTest: 0.1,
+        map: this.createCircleTexture()
       });
       
       this.threeMesh = new THREE.Points(geometry, material);
@@ -867,7 +894,7 @@ export default class PlanA {
       this._objects.push(this.threeMesh);
       
       console.log(`Added ${particles.length} GPU-driven fallback particles to scene`);
-      console.log('Sample positions:', particles.slice(0, 5));
+      console.log('Sample positions with values:', particles.slice(0, 5).map(p => `(${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)})`));
     } catch (error) {
       console.error('Failed to create GPU fallback particles:', error);
       this.createFallbackPoints();
