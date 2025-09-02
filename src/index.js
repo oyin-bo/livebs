@@ -13,6 +13,8 @@ scene.background = new THREE.Color(0x111111);
 
 const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
 camera.position.set(0, 0, 5);
+// Add camera to scene so Plan A can find it
+scene.add(camera);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);

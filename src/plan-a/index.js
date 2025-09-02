@@ -66,7 +66,15 @@ vec2 indexToUV(int index) {
 vec3 computePairForce(vec3 pos1, vec3 pos2, float mass1, float mass2) {
   vec3 dir = pos2 - pos1;
   float d2 = dot(dir, dir) + SOFTENING;
-  float force = mass1 * mass2 / d2;
+  float distance = sqrt(d2);
+  
+  // Social force with both attraction and repulsion
+  float attraction = mass1 * mass2 / (d2 + 1.0);
+  float repulsion = 0.1 / (distance + 0.1);
+  
+  // Create interesting dynamics: attraction at medium range, repulsion at close range
+  float force = attraction - repulsion * 2.0;
+  
   return force * normalize(dir);
 }
 
@@ -238,15 +246,15 @@ export default class PlanA {
     
     // Configuration with defaults
     this.options = {
-      particleCount: this.options.particleCount || 100000,
+      particleCount: this.options.particleCount || 50000,
       samplingFraction: this.options.samplingFraction || 0.25,
       dt: this.options.dt || 0.016,
       integrationMethod: this.options.integrationMethod || 'semi-implicit',
       wrapMode: this.options.wrapMode || 'wrap',
-      worldBounds: this.options.worldBounds || { min: [-10, -10, -10], max: [10, 10, 10] },
+      worldBounds: this.options.worldBounds || { min: [-5, -5, -5], max: [5, 5, 5] },
       enableVelocityTexture: this.options.enableVelocityTexture !== false,
       seed: this.options.seed || 12345,
-      pointSize: this.options.pointSize || 2.0
+      pointSize: this.options.pointSize || 4.0
     };
 
     // Internal state
@@ -680,28 +688,48 @@ export default class PlanA {
       if (this.renderer && this.scene) {
         this.renderToThreeJS();
       }
+    } else if (this.threeMesh) {
+      // Animate fallback particles
+      this.animateFallbackParticles();
     }
   }
 
   renderToThreeJS() {
     // This method integrates with Three.js rendering
-    // For now, we use the direct WebGL rendering approach
-    // More advanced integration could create Three.js materials that sample our textures
+    if (!this.renderer || !this.scene) return;
     
-    if (!this.renderer) return;
+    // Find the active camera
+    let camera = null;
     
-    // Get camera matrices
-    const camera = this.renderer.info?.render?.calls > 0 ? 
-      (this.scene.children.find(obj => obj.isCamera) || this.renderer.xr?.getCamera()) : null;
+    // Try to get camera from Three.js scene
+    this.scene.traverse((obj) => {
+      if (obj.isCamera && !camera) {
+        camera = obj;
+      }
+    });
+    
+    // Fallback: try to get from renderer info or create a default perspective camera
+    if (!camera) {
+      camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+      camera.position.set(0, 0, 5);
+    }
     
     if (camera) {
+      // Update camera matrices
+      camera.updateMatrixWorld();
       const projectionMatrix = camera.projectionMatrix;
       const viewMatrix = camera.matrixWorldInverse;
-      const projectionView = projectionMatrix.clone().multiply(viewMatrix);
+      const projectionView = new THREE.Matrix4().multiplyMatrices(projectionMatrix, viewMatrix);
       
-      // Save Three.js state
+      // Save Three.js WebGL state
       const oldViewport = this.gl.getParameter(this.gl.VIEWPORT);
       const oldProgram = this.gl.getParameter(this.gl.CURRENT_PROGRAM);
+      const oldVAO = this.gl.getParameter(this.gl.VERTEX_ARRAY_BINDING);
+      const oldFramebuffer = this.gl.getParameter(this.gl.FRAMEBUFFER_BINDING);
+      
+      // Ensure we're rendering to the main framebuffer
+      this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, null);
+      this.gl.viewport(0, 0, this.renderer.domElement.width, this.renderer.domElement.height);
       
       // Render our particles
       this.render(projectionView.elements);
@@ -709,6 +737,8 @@ export default class PlanA {
       // Restore Three.js state
       this.gl.viewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
       this.gl.useProgram(oldProgram);
+      this.gl.bindVertexArray(oldVAO);
+      this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, oldFramebuffer);
     }
   }
 
@@ -742,6 +772,14 @@ export default class PlanA {
     this._objects.push(this.threeMesh);
     
     console.log(`Added ${count} fallback particles to scene`);
+  }
+
+  animateFallbackParticles() {
+    if (!this.threeMesh) return;
+    
+    // Simple rotation animation for fallback particles
+    this.threeMesh.rotation.x += 0.005;
+    this.threeMesh.rotation.y += 0.01;
   }
 
   // Legacy compatibility methods

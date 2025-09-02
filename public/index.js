@@ -26693,7 +26693,9 @@ void main() {
     }
   };
   function generateParticlePositions(count, seed = 12345, worldBounds = { min: [-10, -10, -10], max: [10, 10, 10] }) {
-    const positions = new Float32Array(count * 4);
+    const textureSize = Math.ceil(Math.sqrt(count));
+    const totalTexels = textureSize * textureSize;
+    const positions = new Float32Array(totalTexels * 4);
     let rng = seed;
     function random() {
       rng = (rng * 1664525 + 1013904223) % 4294967296;
@@ -26706,10 +26708,19 @@ void main() {
       positions[base + 2] = worldBounds.min[2] + random() * (worldBounds.max[2] - worldBounds.min[2]);
       positions[base + 3] = 1;
     }
+    for (let i = count; i < totalTexels; i++) {
+      const base = i * 4;
+      positions[base + 0] = 0;
+      positions[base + 1] = 0;
+      positions[base + 2] = 0;
+      positions[base + 3] = 0;
+    }
     return positions;
   }
   function generateParticleVelocities(count, seed = 54321) {
-    const velocities = new Float32Array(count * 4);
+    const textureSize = Math.ceil(Math.sqrt(count));
+    const totalTexels = textureSize * textureSize;
+    const velocities = new Float32Array(totalTexels * 4);
     let rng = seed;
     function random() {
       rng = (rng * 1664525 + 1013904223) % 4294967296;
@@ -26720,6 +26731,13 @@ void main() {
       velocities[base + 0] = (random() - 0.5) * 2;
       velocities[base + 1] = (random() - 0.5) * 2;
       velocities[base + 2] = (random() - 0.5) * 2;
+      velocities[base + 3] = 0;
+    }
+    for (let i = count; i < totalTexels; i++) {
+      const base = i * 4;
+      velocities[base + 0] = 0;
+      velocities[base + 1] = 0;
+      velocities[base + 2] = 0;
       velocities[base + 3] = 0;
     }
     return velocities;
@@ -26943,7 +26961,15 @@ vec2 indexToUV(int index) {
 vec3 computePairForce(vec3 pos1, vec3 pos2, float mass1, float mass2) {
   vec3 dir = pos2 - pos1;
   float d2 = dot(dir, dir) + SOFTENING;
-  float force = mass1 * mass2 / d2;
+  float distance = sqrt(d2);
+  
+  // Social force with both attraction and repulsion
+  float attraction = mass1 * mass2 / (d2 + 1.0);
+  float repulsion = 0.1 / (distance + 0.1);
+  
+  // Create interesting dynamics: attraction at medium range, repulsion at close range
+  float force = attraction - repulsion * 2.0;
+  
   return force * normalize(dir);
 }
 
@@ -27105,15 +27131,15 @@ void main() {
         this.options = c || {};
       }
       this.options = {
-        particleCount: this.options.particleCount || 1e5,
+        particleCount: this.options.particleCount || 5e4,
         samplingFraction: this.options.samplingFraction || 0.25,
         dt: this.options.dt || 0.016,
         integrationMethod: this.options.integrationMethod || "semi-implicit",
         wrapMode: this.options.wrapMode || "wrap",
-        worldBounds: this.options.worldBounds || { min: [-10, -10, -10], max: [10, 10, 10] },
+        worldBounds: this.options.worldBounds || { min: [-5, -5, -5], max: [5, 5, 5] },
         enableVelocityTexture: this.options.enableVelocityTexture !== false,
         seed: this.options.seed || 12345,
-        pointSize: this.options.pointSize || 2
+        pointSize: this.options.pointSize || 4
       };
       this.isInitialized = false;
       this.frameCount = 0;
@@ -27452,20 +27478,38 @@ ${source}`);
         if (this.renderer && this.scene) {
           this.renderToThreeJS();
         }
+      } else if (this.threeMesh) {
+        this.animateFallbackParticles();
       }
     }
     renderToThreeJS() {
-      if (!this.renderer) return;
-      const camera2 = this.renderer.info?.render?.calls > 0 ? this.scene.children.find((obj) => obj.isCamera) || this.renderer.xr?.getCamera() : null;
+      if (!this.renderer || !this.scene) return;
+      let camera2 = null;
+      this.scene.traverse((obj) => {
+        if (obj.isCamera && !camera2) {
+          camera2 = obj;
+        }
+      });
+      if (!camera2) {
+        camera2 = new PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1e3);
+        camera2.position.set(0, 0, 5);
+      }
       if (camera2) {
+        camera2.updateMatrixWorld();
         const projectionMatrix = camera2.projectionMatrix;
         const viewMatrix = camera2.matrixWorldInverse;
-        const projectionView = projectionMatrix.clone().multiply(viewMatrix);
+        const projectionView = new Matrix4().multiplyMatrices(projectionMatrix, viewMatrix);
         const oldViewport = this.gl.getParameter(this.gl.VIEWPORT);
         const oldProgram = this.gl.getParameter(this.gl.CURRENT_PROGRAM);
+        const oldVAO = this.gl.getParameter(this.gl.VERTEX_ARRAY_BINDING);
+        const oldFramebuffer = this.gl.getParameter(this.gl.FRAMEBUFFER_BINDING);
+        this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, null);
+        this.gl.viewport(0, 0, this.renderer.domElement.width, this.renderer.domElement.height);
         this.render(projectionView.elements);
         this.gl.viewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
         this.gl.useProgram(oldProgram);
+        this.gl.bindVertexArray(oldVAO);
+        this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, oldFramebuffer);
       }
     }
     createFallbackPoints() {
@@ -27490,6 +27534,11 @@ ${source}`);
       this.scene.add(this.threeMesh);
       this._objects.push(this.threeMesh);
       console.log(`Added ${count} fallback particles to scene`);
+    }
+    animateFallbackParticles() {
+      if (!this.threeMesh) return;
+      this.threeMesh.rotation.x += 5e-3;
+      this.threeMesh.rotation.y += 0.01;
     }
     // Legacy compatibility methods
     getFrameStats() {
@@ -27599,6 +27648,7 @@ ${source}`);
   scene.background = new Color(1118481);
   var camera = new PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1e3);
   camera.position.set(0, 0, 5);
+  scene.add(camera);
   var renderer = new WebGLRenderer({ antialias: true });
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.domElement.style.width = "100%";
