@@ -21,7 +21,7 @@ export default class PlanC {
       cellSize: 0.8,
       worldBounds: { min: [-8, -8, -8], max: [8, 8, 8] },
       dt: 0.016,
-      pointSize: 4.0
+      pointSize: 12.0  // Larger point size for better visibility
     };
     
     // Grid dimensions
@@ -306,18 +306,19 @@ export default class PlanC {
     for (let i = 0; i < this.options.particleCount; i++) {
       const base = i * 4;
       
-      // Create multiple clusters for more interesting visual distribution
-      const clusterCount = 5;
+      // Create multiple clusters spread across the world bounds for better visualization
+      const clusterCount = 6;
       const clusterIndex = Math.floor(Math.random() * clusterCount);
-      const clusterRadius = 1.5;
+      const clusterRadius = 2.0;
       
-      // Cluster centers
+      // Cluster centers spread across the world
       const clusterCenters = [
         [0, 0, 0],
-        [3, 2, 1],
-        [-2, 3, -1],
-        [1, -2, 3],
-        [-3, -1, -2]
+        [4, 3, 2],
+        [-4, 3, -2],
+        [2, -3, 4],
+        [-3, -2, -3],
+        [0, 4, 0]
       ];
       
       const center = clusterCenters[clusterIndex];
@@ -332,6 +333,16 @@ export default class PlanC {
       data[base + 2] = center[2] + r * Math.cos(phi);
       data[base + 3] = 1.0; // mass
     }
+    
+    console.log('Plan C: Generated particle positions, sample positions:', {
+      count: this.options.particleCount,
+      worldBounds: bounds,
+      samples: [
+        [data[0], data[1], data[2]],
+        [data[400], data[401], data[402]],
+        [data[800], data[801], data[802]]
+      ]
+    });
     
     return data;
   }
@@ -489,30 +500,32 @@ export default class PlanC {
     
     const gl = this.gl;
     
-    // Get camera from Three.js scene - try multiple approaches
+    // Get camera from main application
     let camera = null;
     
-    // Try to find camera in scene
+    // Try to find camera in scene traversal
     this.scene.traverse((obj) => {
       if (obj.isCamera && !camera) {
         camera = obj;
       }
     });
     
-    // Fallback: try to get camera from renderer
-    if (!camera && this.renderer.xr) {
-      camera = this.renderer.xr.getCamera();
+    // Try to access camera directly from global scope if available
+    if (!camera && typeof window !== 'undefined' && window.camera) {
+      camera = window.camera;
     }
     
-    // If still no camera, create a default view
+    // If still no camera, create a proper default perspective view
     if (!camera) {
-      const projectionView = new THREE.Matrix4();
-      projectionView.makePerspective(-1, 1, 1, -1, 0.1, 1000);
+      console.warn('Plan C: No camera found, using default view');
+      const aspect = this.renderer.domElement.width / this.renderer.domElement.height;
+      const projectionMatrix = new THREE.Matrix4();
+      projectionMatrix.makePerspective(Math.PI / 3, aspect, 0.1, 1000);
       
       const viewMatrix = new THREE.Matrix4();
-      viewMatrix.lookAt(new THREE.Vector3(0, 0, 5), new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 1, 0));
+      viewMatrix.lookAt(new THREE.Vector3(0, 0, 8), new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 1, 0));
       
-      projectionView.multiply(viewMatrix);
+      const projectionView = projectionMatrix.clone().multiply(viewMatrix);
       this.renderParticles(projectionView);
       return;
     }
@@ -529,13 +542,32 @@ export default class PlanC {
   renderParticles(projectionView) {
     const gl = this.gl;
     
+    // Clear any existing WebGL errors
+    while (gl.getError() !== gl.NO_ERROR) { /* Clear error queue */ }
+    
     // Save current WebGL state
     const oldViewport = gl.getParameter(gl.VIEWPORT);
     const oldProgram = gl.getParameter(gl.CURRENT_PROGRAM);
     const oldBlend = gl.getParameter(gl.BLEND);
+    const oldFramebuffer = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+    const oldDepthTest = gl.getParameter(gl.DEPTH_TEST);
     
-    // Render particles
+    // Set viewport to full canvas size
+    const canvas = this.renderer.domElement;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    
+    // Disable depth testing to avoid interference with Three.js
+    gl.disable(gl.DEPTH_TEST);
+    
+    // Make sure we're using the correct program
     gl.useProgram(this.programs.render);
+    
+    // Check for errors after setting up state
+    let error = gl.getError();
+    if (error !== gl.NO_ERROR) {
+      console.warn('Plan C: WebGL error after state setup:', error);
+    }
     
     // Bind position texture
     gl.activeTexture(gl.TEXTURE0);
@@ -554,19 +586,51 @@ export default class PlanC {
     gl.uniform1i(gl.getUniformLocation(this.programs.render, 'u_particleCount'), this.options.particleCount);
     gl.uniform1f(gl.getUniformLocation(this.programs.render, 'u_time'), this.time);
     
+    // Check for errors after setting uniforms
+    error = gl.getError();
+    if (error !== gl.NO_ERROR) {
+      console.warn('Plan C: WebGL error after setting uniforms:', error);
+    }
+    
+    // Debug: Log some values (less frequently now that it's working)
+    if (this.frameCount % 300 === 0) { // Log every 300 frames (5 seconds at 60fps)
+      console.log('Plan C Debug:', {
+        particleTexSize: this.particleTexSize,
+        particleCount: this.options.particleCount,
+        pointSize: this.options.pointSize,
+        time: this.time,
+        canvasSize: [canvas.width, canvas.height]
+      });
+    }
+    
     // Enable blending for particles
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     
-    // Render particles
+    // Bind VAO and render particles
     gl.bindVertexArray(this.vaos.particles);
+    
+    // Check for errors before drawing
+    error = gl.getError();
+    if (error !== gl.NO_ERROR) {
+      console.warn('Plan C: WebGL error before drawing:', error);
+    }
+    
     gl.drawArrays(gl.POINTS, 0, this.options.particleCount);
     
+    // Check for WebGL errors after rendering
+    error = gl.getError();
+    if (error !== gl.NO_ERROR) {
+      console.warn('Plan C: WebGL error after rendering:', error);
+    }
+    
     // Restore WebGL state
-    if (!oldBlend) gl.disable(gl.BLEND);
-    gl.useProgram(oldProgram);
-    gl.viewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
     gl.bindVertexArray(null);
+    if (!oldBlend) gl.disable(gl.BLEND);
+    if (oldDepthTest) gl.enable(gl.DEPTH_TEST);
+    gl.useProgram(oldProgram);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, oldFramebuffer);
+    gl.viewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
   }
 
   setGridUniforms(program) {
@@ -791,13 +855,22 @@ export default class PlanC {
         
         vec3 totalForce = vec3(0.0);
         
-        // Add global attractor force (center of simulation)
-        vec3 centerForce = -myPos * 0.05;
+        // Add global attractor force with oscillation for dynamic movement
+        vec3 centerForce = -myPos * (0.03 + 0.02 * sin(u_time * 0.5));
         totalForce += centerForce;
         
-        // Add swirling force
-        vec3 swirl = vec3(-myPos.y, myPos.x, 0.0) * 0.1;
+        // Add enhanced swirling force that varies over time
+        float swirl_strength = 0.08 + 0.04 * sin(u_time * 0.3);
+        vec3 swirl = vec3(-myPos.y, myPos.x, sin(u_time + myPos.z) * 0.5) * swirl_strength;
         totalForce += swirl;
+        
+        // Add some turbulence for more organic movement
+        vec3 turbulence = vec3(
+          sin(u_time * 2.0 + myPos.x * 0.1) * 0.02,
+          cos(u_time * 1.7 + myPos.y * 0.1) * 0.02,
+          sin(u_time * 2.3 + myPos.z * 0.1) * 0.02
+        );
+        totalForce += turbulence;
         
         // Check neighboring cells (3x3x3 = 27 cells)
         for (int dz = -1; dz <= 1; dz++) {
@@ -870,25 +943,30 @@ export default class PlanC {
         
         // Skip if beyond particle count
         if (particleIndex >= u_particleCount) {
-          gl_Position = vec4(0.0, 0.0, -1.0, 1.0); // Clip this vertex
+          gl_Position = vec4(0.0, 0.0, -100.0, 1.0); // Move far away to clip
+          gl_PointSize = 0.0;
+          v_color = vec3(0.0);
+          v_speed = 0.0;
           return;
         }
         
+        // Convert particle index to texture coordinates
         int x = particleIndex % int(u_texSize.x);
         int y = particleIndex / int(u_texSize.x);
         vec2 uv = (vec2(x, y) + 0.5) / u_texSize;
         
-        vec3 worldPos = texture(u_positions, uv).xyz;
+        // Sample position and velocity
+        vec4 positionData = texture(u_positions, uv);
+        vec3 worldPos = positionData.xyz;
         vec3 velocity = texture(u_velocities, uv).xyz;
         
+        // Transform to clip space
         gl_Position = u_projectionView * vec4(worldPos, 1.0);
+        
+        // Set point size
         gl_PointSize = u_pointSize;
         
-        // Color based on position and velocity
-        float speed = length(velocity);
-        v_speed = speed;
-        
-        // Create rainbow colors based on position and time
+        // Create rainbow colors based on position and time for beautiful visualization
         float hue = (worldPos.x + worldPos.y + worldPos.z) * 0.1 + u_time * 0.5;
         vec3 hsv = vec3(mod(hue, 6.28) / 6.28, 0.8, 0.9);
         
@@ -909,15 +987,22 @@ export default class PlanC {
       out vec4 fragColor;
       
       void main() {
+        // Create beautiful circular particles with smooth edges
         vec2 coord = gl_PointCoord - vec2(0.5);
         float dist = length(coord);
-        float alpha = 1.0 - smoothstep(0.2, 0.5, dist);
+        
+        if (dist > 0.5) {
+          discard; // Outside circle
+        }
+        
+        // Smooth circular gradient
+        float alpha = 1.0 - smoothstep(0.1, 0.5, dist);
         
         // Brighten based on speed
-        float brightness = 0.7 + 0.3 * clamp(v_speed * 2.0, 0.0, 1.0);
+        float brightness = 0.8 + 0.2 * clamp(v_speed * 2.0, 0.0, 1.0);
         vec3 color = v_color * brightness;
         
-        fragColor = vec4(color, alpha * 0.8);
+        fragColor = vec4(color, alpha * 0.9);
       }`;
   }
 
