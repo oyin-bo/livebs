@@ -33,13 +33,13 @@ export default class PlanM {
     
     // Configuration
     this.options = {
-      particleCount: 50000,
+      particleCount: 5000,
       worldBounds: {
         xMin: -4, xMax: 4, yMin: -4, yMax: 4, zMin: 0, zMax: 2
       },
       theta: 0.5,
-      pointSize: 100.0,
-      dt: 1 / 60,
+      pointSize: 10.0,
+      dt: 10 / 60,
       initialSpeed: 0.05,
       gravityStrength: 0.0003,
       softening: 0.2,
@@ -349,7 +349,7 @@ export default class PlanM {
       positions[base + 0] = center[0] + Math.cos(angle) * radius;
       positions[base + 1] = center[1] + Math.sin(angle) * radius;
       positions[base + 2] = center[2] + height;
-      positions[base + 3] = 1.0; // mass
+      positions[base + 3] = 0.5 + Math.random() * 1.5; // mass: random range 0.5 to 2.0
       velocities[base + 0] = (Math.random() - 0.5) * 2.0 * speed;
       velocities[base + 1] = (Math.random() - 0.5) * 2.0 * speed;
       velocities[base + 2] = (Math.random() - 0.5) * 2.0 * speed;

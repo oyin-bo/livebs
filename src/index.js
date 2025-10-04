@@ -55,11 +55,31 @@ function switchPlan(key) {
 }
 
 // Simple keyboard UI: keys 1-4 map to plans A,C,D,M
+// Keys + and - to control simulation speed for Plan M
 window.addEventListener('keydown', (e) => {
 	if (e.key === '1') switchPlan('a');
 	if (e.key === '2') switchPlan('c');
 	if (e.key === '3') switchPlan('d');
 	if (e.key === '4') switchPlan('m');
+	
+	// Speed controls for Plan M
+	if (activePlan === plans.m) {
+		if (e.key === '+' || e.key === '=') {
+			// Increase time step (speed up)
+			activePlan.options.dt *= 2;
+			console.log(`Plan M speed up: dt = ${activePlan.options.dt.toFixed(4)}`);
+		}
+		if (e.key === '-' || e.key === '_') {
+			// Decrease time step (slow down)
+			activePlan.options.dt /= 2;
+			console.log(`Plan M slow down: dt = ${activePlan.options.dt.toFixed(4)}`);
+		}
+		if (e.key === '0') {
+			// Reset to default
+			activePlan.options.dt = 1 / 60;
+			console.log(`Plan M speed reset: dt = ${activePlan.options.dt.toFixed(4)}`);
+		}
+	}
 });
 
 // Basic render loop
