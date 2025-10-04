@@ -7,23 +7,90 @@
 
 import * as THREE from 'three';
 
-// Externalized shader sources and utilities
-import fsQuadVert from './shaders/fullscreen.vert.js';
-import reductionFrag from './shaders/reduction.frag.js';
-import aggregationVert from './shaders/aggregation.vert.js';
-import aggregationFrag from './shaders/aggregation.frag.js';
-import traversalFrag from './shaders/traversal.frag.js';
-import renderVert from './shaders/render.vert.js';
-import renderFrag from './shaders/render.frag.js';
-import velIntegrateFrag from './shaders/vel_integrate.frag.js';
-import posIntegrateFrag from './shaders/pos_integrate.frag.js';
-import { unbindAllTextures as dbgUnbindAllTextures, checkGl as dbgCheckGl, checkFBO as dbgCheckFBO } from './utils/debug.js';
-import { aggregateParticlesIntoL0 as aggregateL0 } from './pipeline/aggregator.js';
-import { runReductionPass as pyramidReduce } from './pipeline/pyramid.js';
-import { calculateForces as pipelineCalculateForces } from './pipeline/traversal.js';
-import { integratePhysics as pipelineIntegratePhysics } from './pipeline/integrator.js';
-import { updateWorldBoundsFromTexture as pipelineUpdateBounds } from './pipeline/bounds.js';
-import { renderParticles as pipelineRenderParticles } from './pipeline/renderer.js';
+// Simplified shaders for initial working implementation
+const vertexShaderSource = `#version 300 es
+precision highp float;
+
+in vec2 a_position;
+
+void main() {
+  gl_Position = vec4(a_position, 0.0, 1.0);
+}`;
+
+const reductionFragmentShader = `#version 300 es
+precision highp float;
+
+uniform sampler2D u_previousLevel;
+
+out vec4 fragColor;
+
+void main() {
+  ivec2 coord = ivec2(gl_FragCoord.xy);
+  
+  // Read 2x2 block from previous level
+  ivec2 childBase = coord * 2;
+  vec4 child00 = texelFetch(u_previousLevel, childBase + ivec2(0,0), 0);
+  vec4 child01 = texelFetch(u_previousLevel, childBase + ivec2(0,1), 0);
+  vec4 child10 = texelFetch(u_previousLevel, childBase + ivec2(1,0), 0);
+  vec4 child11 = texelFetch(u_previousLevel, childBase + ivec2(1,1), 0);
+  
+  // Aggregate: sum all components
+  vec4 aggregate = child00 + child01 + child10 + child11;
+  
+  fragColor = aggregate;
+}`;
+
+const renderVertexShader = `#version 300 es
+precision highp float;
+
+in float a_index;
+
+uniform sampler2D u_positions;
+uniform vec2 u_texSize;
+uniform mat4 u_projectionView;
+uniform float u_pointSize;
+
+out vec3 v_color;
+
+vec2 indexToUV(float index) {
+  float x = mod(index, u_texSize.x);
+  float y = floor(index / u_texSize.x);
+  return (vec2(x, y) + 0.5) / u_texSize;
+}
+
+void main() {
+  vec2 uv = indexToUV(a_index);
+  vec4 posData = texture(u_positions, uv);
+  vec3 worldPos = posData.xyz;
+  
+  // Skip particles that are at origin (unused texels)
+  if (length(worldPos) < 0.001) {
+    gl_Position = vec4(0, 0, -1000, 1); // Move offscreen
+    gl_PointSize = 0.0;
+    v_color = vec3(0);
+    return;
+  }
+  
+  gl_Position = u_projectionView * vec4(worldPos, 1.0);
+  gl_PointSize = u_pointSize;
+  
+  // Color based on position for visualization
+  v_color = normalize(worldPos) * 0.5 + 0.5;
+}`;
+
+const renderFragmentShader = `#version 300 es
+precision mediump float;
+
+in vec3 v_color;
+out vec4 fragColor;
+
+void main() {
+  vec2 coord = gl_PointCoord - vec2(0.5);
+  float dist = length(coord);
+  float alpha = 1.0 - smoothstep(0.3, 0.5, dist);
+  vec3 color = v_color * (0.8 + 0.2 * (1.0 - dist));
+  fragColor = vec4(color, alpha);
+}`;
 
 export default class PlanM {
   constructor(scene, renderer) {
@@ -33,19 +100,11 @@ export default class PlanM {
     
     // Configuration
     this.options = {
-      particleCount: 50000,
+      particleCount: 50000, // Start smaller for initial implementation
       worldBounds: { min: [-10, -10, -10], max: [10, 10, 10] },
-      theta: 0.5,
+      theta: 0.5, // Barnes-Hut parameter
       pointSize: 2.0,
-      dt: 0.016,
-      initialSpeed: 0.05,
-      gravityStrength: 0.0003,
-      softening: 0.2,
-      damping: 0.0,
-      maxSpeed: 2.0,
-      maxAccel: 1.0,
-      debugSkipQuadtree: false,
-      renderOrthoFallback: true
+      dt: 0.016
     };
     
     // Internal state
@@ -54,14 +113,11 @@ export default class PlanM {
     this.frameCount = 0;
     this.time = 0;
     this.running = false;
-    this._cameraInfoLogged = false;
     
     // GPU resources
     this.levelTextures = [];
     this.levelFramebuffers = [];
     this.positionTextures = null;
-    this.velocityTextures = null;
-    this.forceTexture = null;
     this.programs = {};
     this.quadVAO = null;
     this.particleVAO = null;
@@ -69,25 +125,6 @@ export default class PlanM {
     this.textureHeight = 0;
     this.numLevels = 0;
     this.L0Size = 0;
-    this._disableFloatBlend = false;
-    this._quadtreeDisabled = false;
-    this._orthoCam = null;
-    this._lastBoundsUpdateFrame = -1;
-  }
-
-  // Debug helper: unbind all textures on commonly used units to avoid feedback loops
-  unbindAllTextures() {
-    dbgUnbindAllTextures(this.gl);
-  }
-
-  // Debug helper: log gl errors with a tag
-  checkGl(tag) {
-    return dbgCheckGl(this.gl, tag);
-  }
-
-  // Debug helper: check FBO completeness and tag
-  checkFBO(tag) {
-    dbgCheckFBO(this.gl, tag);
   }
 
   async init() {
@@ -104,7 +141,6 @@ export default class PlanM {
       this.createTextures();
       this.createGeometry();
       this.initializeParticles();
-      pipelineUpdateBounds(this, 512);
       
       this.isInitialized = true;
       console.log('Plan M initialized successfully');
@@ -119,6 +155,7 @@ export default class PlanM {
   checkWebGL2Support() {
     const gl = this.gl;
     
+    // Check for required extensions
     const colorBufferFloat = gl.getExtension('EXT_color_buffer_float');
     const floatBlend = gl.getExtension('EXT_float_blend');
     
@@ -127,28 +164,22 @@ export default class PlanM {
     }
     
     if (!floatBlend) {
-      throw new Error('EXT_float_blend extension not supported: required for additive blending to float textures');
+      console.warn('EXT_float_blend not available, may have blending limitations');
     }
     
-    const caps = {
-      maxVertexTextureUnits: gl.getParameter(gl.MAX_VERTEX_TEXTURE_IMAGE_UNITS),
-      maxTextureUnits: gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS),
-      maxDrawBuffers: gl.getParameter(gl.MAX_DRAW_BUFFERS),
-    };
-    console.log('WebGL caps:', caps);
-
     console.log('WebGL2 extensions check passed');
   }
 
   calculateTextureDimensions() {
-    const desired = Math.max(64, Math.ceil(Math.sqrt(this.options.particleCount * 4)));
-    const nextPow2 = Math.pow(2, Math.ceil(Math.log2(desired)));
-    const maxTex = this.gl.getParameter(this.gl.MAX_TEXTURE_SIZE);
-    this.L0Size = Math.min(nextPow2, maxTex);
-    this.numLevels = Math.min(8, Math.ceil(Math.log2(this.L0Size)) + 1);
+    // Calculate L0 size to fit particles with reasonable density
+    this.L0Size = Math.max(64, Math.ceil(Math.sqrt(this.options.particleCount * 4))); // 4x oversampling
+    this.numLevels = Math.min(8, Math.ceil(Math.log2(this.L0Size)) + 1); // Limit to 8 levels
     
+    // For position textures - ensure we have enough space for all particles
     this.textureWidth = Math.ceil(Math.sqrt(this.options.particleCount));
     this.textureHeight = Math.ceil(this.options.particleCount / this.textureWidth);
+    
+    // Ensure we have exactly the right amount of space
     this.actualTextureSize = this.textureWidth * this.textureHeight;
     
     console.log(`Quadtree: L0=${this.L0Size}x${this.L0Size}, ${this.numLevels} levels`);
@@ -158,12 +189,17 @@ export default class PlanM {
   createShaderPrograms() {
     const gl = this.gl;
     
-    this.programs.aggregation = this.createProgram(aggregationVert, aggregationFrag);
-    this.programs.reduction = this.createProgram(fsQuadVert, reductionFrag);
-    this.programs.traversal = this.createProgram(fsQuadVert, traversalFrag);
-    this.programs.velIntegrate = this.createProgram(fsQuadVert, velIntegrateFrag);
-    this.programs.posIntegrate = this.createProgram(fsQuadVert, posIntegrateFrag);
-    this.programs.render = this.createProgram(renderVert, renderFrag);
+    // Reduction program
+    this.programs.reduction = this.createProgram(
+      vertexShaderSource, 
+      reductionFragmentShader
+    );
+    
+    // Render program
+    this.programs.render = this.createProgram(
+      renderVertexShader, 
+      renderFragmentShader
+    );
     
     console.log('Shader programs created successfully');
   }
@@ -209,6 +245,7 @@ export default class PlanM {
   createTextures() {
     const gl = this.gl;
     
+    // Create quadtree level textures
     this.levelTextures = [];
     this.levelFramebuffers = [];
     
@@ -225,7 +262,6 @@ export default class PlanM {
       const framebuffer = gl.createFramebuffer();
       gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
-      gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
       
       this.levelTextures.push({texture, size: currentSize});
       this.levelFramebuffers.push(framebuffer);
@@ -233,9 +269,8 @@ export default class PlanM {
       currentSize = Math.max(1, Math.floor(currentSize / 2));
     }
     
+    // Create particle position textures (ping-pong)
     this.positionTextures = this.createPingPongTextures(this.textureWidth, this.textureHeight);
-    this.velocityTextures = this.createPingPongTextures(this.textureWidth, this.textureHeight);
-    this.forceTexture = this.createRenderTexture(this.textureWidth, this.textureHeight);
     
     console.log(`Created ${this.numLevels} quadtree level textures and particle textures`);
   }
@@ -257,7 +292,6 @@ export default class PlanM {
       const framebuffer = gl.createFramebuffer();
       gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
-      gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
       
       textures.push(texture);
       framebuffers.push(framebuffer);
@@ -274,27 +308,10 @@ export default class PlanM {
     };
   }
 
-  createRenderTexture(width, height) {
-    const gl = this.gl;
-    const texture = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, height, 0, gl.RGBA, gl.FLOAT, null);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-
-    const framebuffer = gl.createFramebuffer();
-    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
-    gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
-
-    return { texture, framebuffer };
-  }
-
   createGeometry() {
     const gl = this.gl;
     
+    // Full-screen quad for reduction passes
     const quadVertices = new Float32Array([
       -1, -1,  1, -1,  -1, 1,  1, 1
     ]);
@@ -308,6 +325,7 @@ export default class PlanM {
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     
+    // Particle indices for rendering
     const particleIndices = new Float32Array(this.options.particleCount);
     for (let i = 0; i < this.options.particleCount; i++) {
       particleIndices[i] = i;
@@ -326,73 +344,45 @@ export default class PlanM {
   }
 
   initializeParticles() {
+    // Create array with proper size for texture dimensions
     const positions = new Float32Array(this.actualTextureSize * 4);
-    const velocities = new Float32Array(this.actualTextureSize * 4);
     
+    // Generate random particles within world bounds that form a swarm pattern
     const bounds = this.options.worldBounds;
     const center = [
       (bounds.min[0] + bounds.max[0]) / 2,
       (bounds.min[1] + bounds.max[1]) / 2,
       (bounds.min[2] + bounds.max[2]) / 2
     ];
-    const speed = (this.options.initialSpeed !== undefined) ? this.options.initialSpeed : 0.05;
     
     for (let i = 0; i < this.options.particleCount; i++) {
       const base = i * 4;
       
+      // Create clustered distribution for better visualization
       const angle = Math.random() * Math.PI * 2;
-      const radius = Math.random() * 3 + Math.random() * 1;
+      const radius = Math.random() * 3 + Math.random() * 1; // Smaller radius for better visibility
       const height = (Math.random() - 0.5) * 2;
       
       positions[base + 0] = center[0] + Math.cos(angle) * radius;
       positions[base + 1] = center[1] + Math.sin(angle) * radius;
       positions[base + 2] = center[2] + height;
       positions[base + 3] = 1.0; // mass
-      velocities[base + 0] = (Math.random() - 0.5) * 2.0 * speed;
-      velocities[base + 1] = (Math.random() - 0.5) * 2.0 * speed;
-      velocities[base + 2] = (Math.random() - 0.5) * 2.0 * speed;
-      velocities[base + 3] = 0.0;
     }
     
+    // Fill remaining texels with zero (if any)
     for (let i = this.options.particleCount; i < this.actualTextureSize; i++) {
       const base = i * 4;
       positions[base + 0] = 0;
       positions[base + 1] = 0;
       positions[base + 2] = 0;
       positions[base + 3] = 0;
-      velocities[base + 0] = 0;
-      velocities[base + 1] = 0;
-      velocities[base + 2] = 0;
-      velocities[base + 3] = 0;
     }
     
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (let i = 0; i < this.options.particleCount; i++) {
-      const base = i * 4;
-      const x = positions[base + 0];
-      const y = positions[base + 1];
-      if (x < minX) minX = x;
-      if (y < minY) minY = y;
-      if (x > maxX) maxX = x;
-      if (y > maxY) maxY = y;
-    }
-    const padX = Math.max(0.5, 0.1 * Math.max(1e-6, (maxX - minX)));
-    const padY = Math.max(0.5, 0.1 * Math.max(1e-6, (maxY - minY)));
-    this.options.worldBounds = {
-      min: [minX - padX, minY - padY, this.options.worldBounds.min[2]],
-      max: [maxX + padX, maxY + padY, this.options.worldBounds.max[2]]
-    };
-
+    // Upload to GPU
     this.uploadTextureData(this.positionTextures.textures[0], positions);
     this.uploadTextureData(this.positionTextures.textures[1], positions);
-    this.uploadTextureData(this.velocityTextures.textures[0], velocities);
-    this.uploadTextureData(this.velocityTextures.textures[1], velocities);
     
     console.log(`Particle data initialized: ${this.options.particleCount} particles in ${this.actualTextureSize} texels`);
-    console.log(`Initial particle 0: pos=[${positions[0].toFixed(2)}, ${positions[1].toFixed(2)}, ${positions[2].toFixed(2)}] mass=${positions[3]}`);
-    console.log(`Initial velocity 0: vel=[${velocities[0].toFixed(3)}, ${velocities[1].toFixed(3)}, ${velocities[2].toFixed(3)}]`);
-    console.log(`World bounds after init:`, this.options.worldBounds);
-    console.log(`Bounds range: X=[${minX.toFixed(2)}, ${maxX.toFixed(2)}] Y=[${minY.toFixed(2)}, ${maxY.toFixed(2)}]`);
   }
 
   uploadTextureData(texture, data) {
@@ -428,41 +418,23 @@ export default class PlanM {
     
     if (this.isInitialized) {
       this.step();
-      if ((this.frameCount % 10) === 0) {
-        pipelineUpdateBounds(this, 256);
-      }
-      
-      // Debug: log first particle position periodically
-      if (this.frameCount % 60 === 0 && this.frameCount < 300) {
-        const gl = this.gl;
-        gl.bindFramebuffer(gl.FRAMEBUFFER, this.positionTextures.framebuffers[this.positionTextures.currentIndex]);
-        const px = new Float32Array(4);
-        gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, px);
-        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-        console.log(`Frame ${this.frameCount}: P0 pos=[${px[0].toFixed(2)}, ${px[1].toFixed(2)}, ${px[2].toFixed(2)}] mass=${px[3].toFixed(2)}`);
-      }
-      
-      pipelineRenderParticles(this);
+      this.renderToThreeJS();
     }
   }
 
   step() {
-    if (this.options.debugSkipQuadtree || this._quadtreeDisabled) {
-      this.clearForceTexture();
-    } else {
-      this.buildQuadtree();
-      pipelineCalculateForces(this);
-    }
-    pipelineIntegratePhysics(this);
+    // Build quadtree (simplified for initial implementation)
+    this.buildQuadtree();
     
+    // Simple animation - rotate particles slightly
     this.time += this.options.dt;
     this.frameCount++;
   }
 
   buildQuadtree() {
     const gl = this.gl;
-    this.unbindAllTextures();
-
+    
+    // Clear all level textures
     for (let i = 0; i < this.numLevels; i++) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.levelFramebuffers[i]);
       gl.viewport(0, 0, this.levelTextures[i].size, this.levelTextures[i].size);
@@ -470,31 +442,130 @@ export default class PlanM {
       gl.clear(gl.COLOR_BUFFER_BIT);
     }
     
-    aggregateL0(this);
-    if (this._quadtreeDisabled) {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      return;
-    }
+    // For now, just populate L0 with dummy data and test reduction
+    this.populateL0WithTestData();
     
+    // Build pyramid via reduction passes
     for (let level = 0; level < this.numLevels - 1; level++) {
-      pyramidReduce(this, level, level + 1);
+      this.runReductionPass(level, level + 1);
     }
   }
 
-  clearForceTexture() {
+  populateL0WithTestData() {
     const gl = this.gl;
-    this.unbindAllTextures();
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.forceTexture.framebuffer);
-    gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
-    gl.viewport(0, 0, this.textureWidth, this.textureHeight);
-    gl.clearColor(0, 0, 0, 0);
+    
+    // Create simple test pattern in L0 for verification
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.levelFramebuffers[0]);
+    gl.viewport(0, 0, this.levelTextures[0].size, this.levelTextures[0].size);
+    
+    // Fill with a simple pattern
+    gl.clearColor(0.1, 0.2, 0.3, 1.0);
     gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  runReductionPass(sourceLevel, targetLevel) {
+    const gl = this.gl;
+    
+    gl.useProgram(this.programs.reduction);
+    
+    // Bind target framebuffer
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.levelFramebuffers[targetLevel]);
+    gl.viewport(0, 0, this.levelTextures[targetLevel].size, this.levelTextures[targetLevel].size);
+    
+    // Bind source texture
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.levelTextures[sourceLevel].texture);
+    
+    const u_previousLevel = gl.getUniformLocation(this.programs.reduction, 'u_previousLevel');
+    gl.uniform1i(u_previousLevel, 0);
+    
+    // Render full-screen quad
+    gl.bindVertexArray(this.quadVAO);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.bindVertexArray(null);
+  }
+
+  renderToThreeJS() {
+    if (!this.renderer || !this.scene) return;
+    
+    // Get camera for projection matrix
+    const camera = this.getCameraFromScene();
+    if (!camera) {
+      console.warn('Plan M: No camera found for rendering');
+      return;
+    }
+    
+    const gl = this.gl;
+    
+    // Save WebGL state
+    const oldViewport = gl.getParameter(gl.VIEWPORT);
+    const oldProgram = gl.getParameter(gl.CURRENT_PROGRAM);
+    const oldFramebuffer = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+    
+    try {
+      // Use our render program
+      gl.useProgram(this.programs.render);
+      
+      // Bind default framebuffer (screen)
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+      
+      // Bind particle positions
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.positionTextures.getCurrentTexture());
+      
+      // Set uniforms
+      const u_positions = gl.getUniformLocation(this.programs.render, 'u_positions');
+      const u_texSize = gl.getUniformLocation(this.programs.render, 'u_texSize');
+      const u_projectionView = gl.getUniformLocation(this.programs.render, 'u_projectionView');
+      const u_pointSize = gl.getUniformLocation(this.programs.render, 'u_pointSize');
+      
+      gl.uniform1i(u_positions, 0);
+      gl.uniform2f(u_texSize, this.textureWidth, this.textureHeight);
+      gl.uniform1f(u_pointSize, this.options.pointSize * 10); // Make points much larger and more visible
+      
+      // Calculate projection-view matrix
+      camera.updateMatrixWorld();
+      camera.updateProjectionMatrix();
+      const projectionMatrix = camera.projectionMatrix;
+      const viewMatrix = camera.matrixWorldInverse;
+      const projectionView = projectionMatrix.clone().multiply(viewMatrix);
+      gl.uniformMatrix4fv(u_projectionView, false, projectionView.elements);
+      
+      // Enable blending for particles
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.enable(gl.DEPTH_TEST);
+      
+      // Render particles
+      gl.bindVertexArray(this.particleVAO);
+      gl.drawArrays(gl.POINTS, 0, this.options.particleCount);
+      gl.bindVertexArray(null);
+      
+      gl.disable(gl.BLEND);
+      gl.disable(gl.DEPTH_TEST);
+      
+      // Debug: Log on first few frames
+      if (this.frameCount < 3) {
+        console.log(`Plan M: Rendered ${this.options.particleCount} particles at frame ${this.frameCount}`);
+        console.log(`Plan M: Camera position:`, camera.position);
+        console.log(`Plan M: Point size:`, this.options.pointSize * 10);
+      }
+      
+    } catch (error) {
+      console.error('Plan M render error:', error);
+    } finally {
+      // Restore WebGL state
+      gl.viewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
+      gl.useProgram(oldProgram);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, oldFramebuffer);
+    }
   }
 
   getCameraFromScene() {
     if (!this.scene) return null;
     
+    // Find camera in scene - check all children recursively
     let camera = null;
     this.scene.traverse((child) => {
       if (child.isCamera && !camera) {
@@ -502,29 +573,25 @@ export default class PlanM {
       }
     });
     
-    if (!camera && window.camera && window.camera.isCamera) {
-      camera = window.camera;
-      if (!this._cameraInfoLogged) {
+    // If no camera found in scene, try to get it from renderer's parent app
+    if (!camera && this.renderer && this.renderer.domElement && this.renderer.domElement.parentElement) {
+      // Look for camera in the global scope (from main app)
+      if (window.camera && window.camera.isCamera) {
+        camera = window.camera;
         console.log('Plan M: Found global camera');
-        this._cameraInfoLogged = true;
       }
     }
     
+    // If still no camera found, create one that should work
     if (!camera) {
       camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
-      camera.position.set(0, 0, 15);
+      camera.position.set(0, 0, 15); // Move camera back further
       camera.lookAt(0, 0, 0);
       camera.updateMatrixWorld();
       camera.updateProjectionMatrix();
-      if (!this._cameraInfoLogged) {
-        console.log('Plan M: Using fallback camera');
-        this._cameraInfoLogged = true;
-      }
+      console.log('Plan M: Using fallback camera');
     } else {
-      if (!this._cameraInfoLogged) {
-        console.log('Plan M: Found camera in scene:', camera.constructor.name);
-        this._cameraInfoLogged = true;
-      }
+      console.log('Plan M: Found camera in scene:', camera.constructor.name);
     }
     
     return camera;
@@ -535,13 +602,16 @@ export default class PlanM {
     
     console.log('Creating Plan M fallback visualization');
     
+    // Create a more sophisticated quadtree visualization
     const group = new THREE.Group();
     
+    // Particle swarm - create a 3D swarm pattern
     const particleGeometry = new THREE.BufferGeometry();
     const count = Math.min(this.options.particleCount, 50000);
     const positions = new Float32Array(count * 3);
     const colors = new Float32Array(count * 3);
     
+    // Create swarm pattern
     for (let i = 0; i < count; i++) {
       const angle = Math.random() * Math.PI * 2;
       const radius = Math.random() * 8 + Math.random() * 2;
@@ -551,6 +621,7 @@ export default class PlanM {
       positions[i * 3 + 1] = Math.sin(angle) * radius;
       positions[i * 3 + 2] = height;
       
+      // Color based on distance from center
       const dist = Math.sqrt(positions[i * 3] ** 2 + positions[i * 3 + 1] ** 2 + positions[i * 3 + 2] ** 2);
       colors[i * 3 + 0] = 0.2 + 0.8 * (1 - dist / 10);
       colors[i * 3 + 1] = 0.4 + 0.6 * (1 - dist / 10);
@@ -571,6 +642,7 @@ export default class PlanM {
     const particles = new THREE.Points(particleGeometry, particleMaterial);
     group.add(particles);
     
+    // Quadtree levels visualization with proper scaling
     const levels = Math.min(6, this.numLevels);
     for (let i = 0; i < levels; i++) {
       const size = Math.pow(2, levels - i) * 0.1;
@@ -599,6 +671,7 @@ export default class PlanM {
     
     const gl = this.gl;
     
+    // Clean up textures
     this.levelTextures.forEach(level => gl.deleteTexture(level.texture));
     this.levelFramebuffers.forEach(fbo => gl.deleteFramebuffer(fbo));
     
@@ -606,20 +679,15 @@ export default class PlanM {
       this.positionTextures.textures.forEach(tex => gl.deleteTexture(tex));
       this.positionTextures.framebuffers.forEach(fbo => gl.deleteFramebuffer(fbo));
     }
-    if (this.velocityTextures) {
-      this.velocityTextures.textures.forEach(tex => gl.deleteTexture(tex));
-      this.velocityTextures.framebuffers.forEach(fbo => gl.deleteFramebuffer(fbo));
-    }
-    if (this.forceTexture) {
-      gl.deleteTexture(this.forceTexture.texture);
-      gl.deleteFramebuffer(this.forceTexture.framebuffer);
-    }
     
+    // Clean up programs
     Object.values(this.programs).forEach(program => gl.deleteProgram(program));
     
+    // Clean up VAOs
     if (this.quadVAO) gl.deleteVertexArray(this.quadVAO);
     if (this.particleVAO) gl.deleteVertexArray(this.particleVAO);
     
+    // Clean up Three.js objects
     this._objects.forEach(o => this.scene.remove(o));
     this._objects = [];
     
