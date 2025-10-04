@@ -34,10 +34,12 @@ export default class PlanM {
     // Configuration
     this.options = {
       particleCount: 50000,
-      worldBounds: { min: [-10, -10, -10], max: [10, 10, 10] },
+      worldBounds: {
+        xMin: -4, xMax: 4, yMin: -4, yMax: 4, zMin: 0, zMax: 2
+      },
       theta: 0.5,
-      pointSize: 2.0,
-      dt: 0.016,
+      pointSize: 100.0,
+      dt: 1 / 60,
       initialSpeed: 0.05,
       gravityStrength: 0.0003,
       softening: 0.2,
@@ -331,9 +333,9 @@ export default class PlanM {
     
     const bounds = this.options.worldBounds;
     const center = [
-      (bounds.min[0] + bounds.max[0]) / 2,
-      (bounds.min[1] + bounds.max[1]) / 2,
-      (bounds.min[2] + bounds.max[2]) / 2
+      (bounds.xMin + bounds.xMax) / 2,
+      (bounds.yMin + bounds.yMax) / 2,
+      (bounds.zMin + bounds.zMax) / 2
     ];
     const speed = (this.options.initialSpeed !== undefined) ? this.options.initialSpeed : 0.05;
     
@@ -379,8 +381,8 @@ export default class PlanM {
     const padX = Math.max(0.5, 0.1 * Math.max(1e-6, (maxX - minX)));
     const padY = Math.max(0.5, 0.1 * Math.max(1e-6, (maxY - minY)));
     this.options.worldBounds = {
-      min: [minX - padX, minY - padY, this.options.worldBounds.min[2]],
-      max: [maxX + padX, maxY + padY, this.options.worldBounds.max[2]]
+      min: [minX - padX, minY - padY, this.options.worldBounds.zMin],
+      max: [maxX + padX, maxY + padY, this.options.worldBounds.zMax]
     };
 
     this.uploadTextureData(this.positionTextures.textures[0], positions);

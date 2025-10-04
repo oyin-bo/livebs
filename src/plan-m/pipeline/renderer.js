@@ -19,7 +19,7 @@ export function renderParticles(ctx) {
     // Use render program
     gl.useProgram(ctx.programs.render);
 
-    // Default framebuffer (screen)
+    // Default framebuffer (screen) - DON'T restore old viewport, use full canvas!
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
     gl.disable(gl.SCISSOR_TEST);
@@ -29,16 +29,38 @@ export function renderParticles(ctx) {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, ctx.positionTextures.getCurrentTexture());
 
+    // Calculate projection-view matrix
+    camera.updateMatrixWorld();
+    camera.updateProjectionMatrix();
+    const projectionMatrix = camera.projectionMatrix;
+    const viewMatrix = camera.matrixWorldInverse;
+    const projectionViewMatrix = new Float32Array(16);
+    
+    // Multiply projection * view manually (column-major order)
+    const p = projectionMatrix.elements;
+    const v = viewMatrix.elements;
+    for (let col = 0; col < 4; col++) {
+      for (let row = 0; row < 4; row++) {
+        projectionViewMatrix[col * 4 + row] = 
+          p[0 * 4 + row] * v[col * 4 + 0] +
+          p[1 * 4 + row] * v[col * 4 + 1] +
+          p[2 * 4 + row] * v[col * 4 + 2] +
+          p[3 * 4 + row] * v[col * 4 + 3];
+      }
+    }
+
     // Uniforms
     const u_positions = gl.getUniformLocation(ctx.programs.render, 'u_positions');
     const u_texSize = gl.getUniformLocation(ctx.programs.render, 'u_texSize');
     const u_pointSize = gl.getUniformLocation(ctx.programs.render, 'u_pointSize');
+    const u_projectionView = gl.getUniformLocation(ctx.programs.render, 'u_projectionView');
     const u_worldMin = gl.getUniformLocation(ctx.programs.render, 'u_worldMin');
     const u_worldMax = gl.getUniformLocation(ctx.programs.render, 'u_worldMax');
 
     gl.uniform1i(u_positions, 0);
     gl.uniform2f(u_texSize, ctx.textureWidth, ctx.textureHeight);
     gl.uniform1f(u_pointSize, ctx.options.pointSize);
+    if (u_projectionView) gl.uniformMatrix4fv(u_projectionView, false, projectionViewMatrix);
     if (u_worldMin) gl.uniform2f(u_worldMin, ctx.options.worldBounds.min[0], ctx.options.worldBounds.min[1]);
     if (u_worldMax) gl.uniform2f(u_worldMax, ctx.options.worldBounds.max[0], ctx.options.worldBounds.max[1]);
 
@@ -66,7 +88,8 @@ export function renderParticles(ctx) {
   } catch (error) {
     console.error('Plan M render error:', error);
   } finally {
-    gl.viewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
+    // Don't restore viewport - we want full canvas size for rendering
+    // gl.viewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
     gl.useProgram(oldProgram);
     gl.bindFramebuffer(gl.FRAMEBUFFER, oldFramebuffer);
   }

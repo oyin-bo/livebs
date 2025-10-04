@@ -66,8 +66,12 @@ window.addEventListener('keydown', (e) => {
 function animate() {
 	requestAnimationFrame(animate);
 	controls.update();
-	if (activePlan && activePlan.update) activePlan.update();
+	
+	// Render Three.js scene first
 	renderer.render(scene, camera);
+	
+	// Then update and render custom GPU plans (so they draw on top)
+	if (activePlan && activePlan.update) activePlan.update();
 }
 
 window.addEventListener('resize', () => {
