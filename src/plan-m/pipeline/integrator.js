@@ -9,6 +9,7 @@ export function integratePhysics(ctx) {
   gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
   gl.viewport(0, 0, ctx.textureWidth, ctx.textureHeight);
   gl.disable(gl.SCISSOR_TEST);
+  gl.scissor(0, 0, ctx.textureWidth, ctx.textureHeight);
 
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, ctx.velocityTextures.getCurrentTexture());
@@ -40,6 +41,7 @@ export function integratePhysics(ctx) {
   gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
   gl.viewport(0, 0, ctx.textureWidth, ctx.textureHeight);
   gl.disable(gl.SCISSOR_TEST);
+  gl.scissor(0, 0, ctx.textureWidth, ctx.textureHeight);
 
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, ctx.positionTextures.getCurrentTexture());
