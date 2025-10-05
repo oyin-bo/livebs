@@ -34,7 +34,7 @@ export default class PlanM {
     
     // Configuration
     this.options = {
-      particleCount: 50000,
+      particleCount: 100000,
       worldBounds: {
         min: [-4, -4, 0],
         max: [4, 4, 2]
