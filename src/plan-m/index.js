@@ -34,13 +34,13 @@ export default class PlanM {
     
     // Configuration
     this.options = {
-      particleCount: 5000,
+      particleCount: 50000,
       worldBounds: {
         min: [-4, -4, 0],
         max: [4, 4, 2]
       },
       theta: 0.5,
-      pointSize: 10.0,
+      pointSize: 2.0,
       dt: 10 / 60,
       initialSpeed: 0.05,
       gravityStrength: 0.0003,
