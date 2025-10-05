@@ -51,10 +51,14 @@ void main() {
     return;
   }
 
-  // Map particle XYZ to 3D voxel grid
-  vec3 norm = (pos.xyz - u_worldMin) / (u_worldMax - u_worldMin);
-  norm = clamp(norm, vec3(0.0), vec3(1.0 - (1.0 / u_gridSize)));
+  // Map particle XYZ to 3D voxel grid with isotropic boundaries
+  vec3 worldExtent = u_worldMax - u_worldMin;
+  vec3 norm = (pos.xyz - u_worldMin) / worldExtent;
+  // Clamp to valid range, ensuring symmetric treatment of all axes
+  norm = clamp(norm, vec3(0.0), vec3(0.9999));
   vec3 voxelCoord = floor(norm * u_gridSize);
+  // Ensure voxel is within bounds (defensive)
+  voxelCoord = clamp(voxelCoord, vec3(0.0), vec3(u_gridSize - 1.0));
   
   // Convert 3D voxel to 2D texture coordinate
   float textureSize = u_gridSize * u_slicesPerRow;

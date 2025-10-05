@@ -100,13 +100,13 @@ void main() {
     norm = clamp(norm, vec3(0.0), vec3(1.0 - (1.0 / gridSize)));
     ivec3 myVoxel = ivec3(floor(norm * gridSize));
 
-    // Sample a 3D neighborhood cube (27 voxels - 1 center = 26 voxels)
+    // Sample full 3D neighborhood (27 voxels - 1 center = 26 voxels)
+    // Use all neighbors to avoid anisotropic sampling bias
     const int R = 1;
     for (int dz = -R; dz <= R; dz++) {
       for (int dy = -R; dy <= R; dy++) {
         for (int dx = -R; dx <= R; dx++) {
           if (dx == 0 && dy == 0 && dz == 0) { continue; } // Skip center
-          if (max(max(abs(dx), abs(dy)), abs(dz)) != R) { continue; } // Only outer shell
           
           ivec3 neighborVoxel = myVoxel + ivec3(dx, dy, dz);
           
@@ -121,15 +121,19 @@ void main() {
           float m = nodeData.a;
           if (m <= 0.0) { continue; }
           
+          // Sub-voxel COM for smoother force field
           vec3 com = nodeData.rgb / max(m, 1e-6);
           vec3 delta = com - myPos;
           float d = length(delta);
           float s = cellSize;
           
+          // Distance-based theta criterion (isotropic)
           if ((s / max(d, eps)) < u_theta) {
-            // Approximate: use COM
-            float inv = 1.0 / (d * d + eps * eps);
-            totalForce += normalize(delta) * m * inv;
+            // Approximate: use COM with isotropic softening
+            float denom = d * d + eps * eps;
+            float inv = 1.0 / denom;
+            // Use delta directly (already has direction) instead of normalize + multiply
+            totalForce += (delta / max(d, eps)) * m * inv;
           }
         }
       }
@@ -137,6 +141,7 @@ void main() {
   }
 
   // Near-field: sample L0 local neighborhood (3×3×3 - 1 = 26 voxels)
+  // with extended radius for smoother transitions
   {
     float gridSize = u_gridSizes[0];
     float slicesPerRow = u_slicesPerRow[0];
@@ -144,11 +149,16 @@ void main() {
     norm = clamp(norm, vec3(0.0), vec3(1.0 - (1.0 / gridSize)));
     ivec3 myL0Voxel = ivec3(floor(norm * gridSize));
     
-    const int R0 = 1;
+    // Sample 5×5×5 neighborhood at L0 for smoother near-field
+    const int R0 = 2;
     for (int dz = -R0; dz <= R0; dz++) {
       for (int dy = -R0; dy <= R0; dy++) {
         for (int dx = -R0; dx <= R0; dx++) {
           if (dx == 0 && dy == 0 && dz == 0) { continue; }
+          
+          // Skip far corners to maintain isotropy
+          int manhattan = abs(dx) + abs(dy) + abs(dz);
+          if (manhattan > 4) { continue; }
           
           ivec3 neighborVoxel = myL0Voxel + ivec3(dx, dy, dz);
           if (neighborVoxel.x < 0 || neighborVoxel.y < 0 || neighborVoxel.z < 0 ||
@@ -161,11 +171,14 @@ void main() {
           float m = nodeData.a;
           if (m <= 0.0) { continue; }
           
+          // Sub-voxel COM for high-resolution force field
           vec3 com = nodeData.rgb / max(m, 1e-6);
           vec3 delta = com - myPos;
           float d = length(delta);
-          float inv = 1.0 / (d * d + eps * eps);
-          totalForce += normalize(delta) * m * inv;
+          float denom = d * d + eps * eps;
+          float inv = 1.0 / denom;
+          // Isotropic force calculation
+          totalForce += (delta / max(d, eps)) * m * inv;
         }
       }
     }
