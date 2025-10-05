@@ -1,9 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
-import PlanA from './plan-a/index.js';
-import PlanC from './plan-c/index.js';
-import PlanD from './plan-d/index.js';
 import PlanM from './plan-m/index.js';
 
 // Basic renderer + scene + camera
@@ -30,52 +27,31 @@ scene.add(grid);
 const axes = new THREE.AxesHelper(2);
 scene.add(axes);
 
-// Plans registry
-const plans = {
-	a: new PlanA(scene, renderer),
-	c: new PlanC(scene, renderer),
-	d: new PlanD(scene, renderer),
-	m: new PlanM(scene, renderer),
-};
-
-let activePlan = plans.a;
+// Single production plan: Plan M
+const planM = new PlanM(scene, renderer);
+let activePlan = planM;
 activePlan.start();
 
+// Minimal switch function kept for debug only
 function switchPlan(key) {
-	if (activePlan && activePlan.stop) activePlan.stop();
-	activePlan = plans[key];
-	if (activePlan && activePlan.start) activePlan.start();
-	// update HUD active button
-	try {
-		const hud = document.getElementById('hud');
-		if (hud) {
-			hud.querySelectorAll('button').forEach(b => b.classList.toggle('active', b.getAttribute('data-plan') === key));
-		}
-	} catch (err) { /* ignore */ }
+  // noop in production: only Plan M is supported
+  console.warn('switchPlan is disabled in production mode. Only Plan M is active.');
 }
 
 // Simple keyboard UI: keys 1-4 map to plans A,C,D,M
 // Keys + and - to control simulation speed for Plan M
 window.addEventListener('keydown', (e) => {
-	if (e.key === '1') switchPlan('a');
-	if (e.key === '2') switchPlan('c');
-	if (e.key === '3') switchPlan('d');
-	if (e.key === '4') switchPlan('m');
-	
 	// Speed controls for Plan M
-	if (activePlan === plans.m) {
+	if (activePlan) {
 		if (e.key === '+' || e.key === '=') {
-			// Increase time step (speed up)
 			activePlan.options.dt *= 2;
 			console.log(`Plan M speed up: dt = ${activePlan.options.dt.toFixed(4)}`);
 		}
 		if (e.key === '-' || e.key === '_') {
-			// Decrease time step (slow down)
 			activePlan.options.dt /= 2;
 			console.log(`Plan M slow down: dt = ${activePlan.options.dt.toFixed(4)}`);
 		}
 		if (e.key === '0') {
-			// Reset to default
 			activePlan.options.dt = 1 / 60;
 			console.log(`Plan M speed reset: dt = ${activePlan.options.dt.toFixed(4)}`);
 		}
