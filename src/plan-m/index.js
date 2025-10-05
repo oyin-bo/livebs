@@ -33,21 +33,16 @@ export default class PlanM {
     
     // Configuration
     this.options = {
-      particleCount: 5000,
-      worldBounds: {
-        xMin: -4, xMax: 4, yMin: -4, yMax: 4, zMin: 0, zMax: 2
-      },
-      theta: 0.5,
-      pointSize: 10.0,
+      particleCount: 50000,
       dt: 10 / 60,
-      initialSpeed: 0.05,
       gravityStrength: 0.0003,
-      softening: 0.2,
-      damping: 0.0,
-      maxSpeed: 2.0,
-      maxAccel: 1.0,
-      debugSkipQuadtree: false,
-      renderOrthoFallback: true
+      theta: 0.5,
+      softening: 0.05,
+      pointSize: 10.0,
+      worldBounds: {
+        min: [-5, -5, -5],
+        max: [5, 5, 5]
+      }
     };
     
     // Internal state
@@ -143,24 +138,33 @@ export default class PlanM {
   }
 
   calculateTextureDimensions() {
-    const desired = Math.max(64, Math.ceil(Math.sqrt(this.options.particleCount * 4)));
-    const nextPow2 = Math.pow(2, Math.ceil(Math.log2(desired)));
-    const maxTex = this.gl.getParameter(this.gl.MAX_TEXTURE_SIZE);
-    this.L0Size = Math.min(nextPow2, maxTex);
-    this.numLevels = Math.min(8, Math.ceil(Math.log2(this.L0Size)) + 1);
+    // Octree configuration: 64³ voxels at L0
+    this.octreeGridSize = 64; // 64×64×64 = 262,144 voxels
+    this.numLevels = 7; // L0(64³) → L1(32³) → L2(16³) → L3(8³) → L4(4³) → L5(2³) → L6(1³)
     
+    // Calculate texture sizes for each octree level
+    // Store 3D grid as 2D texture by stacking Z-slices
+    // For 64³: arrange 64 slices of 64×64 in an 8×8 grid → 512×512 texture
+    this.levelGridSizes = [64, 32, 16, 8, 4, 2, 1]; // Grid size at each level
+    const slicesPerRow = 8; // How many Z-slices per row in texture
+    
+    // L0: 512×512 to hold 64 slices of 64×64
+    this.L0Size = this.octreeGridSize * slicesPerRow;
+    
+    // Particle texture dimensions (unchanged)
     this.textureWidth = Math.ceil(Math.sqrt(this.options.particleCount));
     this.textureHeight = Math.ceil(this.options.particleCount / this.textureWidth);
     this.actualTextureSize = this.textureWidth * this.textureHeight;
     
-    console.log(`Quadtree: L0=${this.L0Size}x${this.L0Size}, ${this.numLevels} levels`);
-    console.log(`Position texture: ${this.textureWidth}x${this.textureHeight} for ${this.options.particleCount} particles (${this.actualTextureSize} total texels)`);
+    console.log(`Octree: L0=${this.octreeGridSize}³ voxels (${this.L0Size}×${this.L0Size} texture), ${this.numLevels} levels`);
+    console.log(`  Level sizes: ${this.levelGridSizes.map((s, i) => `L${i}=${s}³`).join(', ')}`);
+    console.log(`Position texture: ${this.textureWidth}×${this.textureHeight} for ${this.options.particleCount} particles (${this.actualTextureSize} total texels)`);
   }
 
   createShaderPrograms() {
     const gl = this.gl;
     
-    this.programs.aggregation = this.createProgram(aggregationVert, aggregationFrag);
+    this.programs.aggregation = this.createProgram(aggregationVert, aggregationFrag, { 'a_particleIndex': 0 });
     this.programs.reduction = this.createProgram(fsQuadVert, reductionFrag);
     this.programs.traversal = this.createProgram(fsQuadVert, traversalFrag);
     this.programs.velIntegrate = this.createProgram(fsQuadVert, velIntegrateFrag);
@@ -170,7 +174,7 @@ export default class PlanM {
     console.log('Shader programs created successfully');
   }
 
-  createProgram(vertexSource, fragmentSource) {
+  createProgram(vertexSource, fragmentSource, bindAttribs = null) {
     const gl = this.gl;
     
     const vertexShader = this.createShader(gl.VERTEX_SHADER, vertexSource);
@@ -179,6 +183,14 @@ export default class PlanM {
     const program = gl.createProgram();
     gl.attachShader(program, vertexShader);
     gl.attachShader(program, fragmentShader);
+    
+    // Bind attribute locations before linking if specified
+    if (bindAttribs) {
+      for (const [name, location] of Object.entries(bindAttribs)) {
+        gl.bindAttribLocation(program, location, name);
+      }
+    }
+    
     gl.linkProgram(program);
     
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
@@ -214,11 +226,16 @@ export default class PlanM {
     this.levelTextures = [];
     this.levelFramebuffers = [];
     
-    let currentSize = this.L0Size;
+    // Create octree level textures with appropriate sizes
+    // Each level's texture size is calculated based on 3D grid mapped to 2D
+    const slicesPerRow = 8;
     for (let i = 0; i < this.numLevels; i++) {
+      const gridSize = this.levelGridSizes[i]; // e.g., 64, 32, 16, 8, 4, 2, 1
+      const textureSize = gridSize * slicesPerRow; // e.g., 512, 256, 128, 64, 32, 16, 8
+      
       const texture = gl.createTexture();
       gl.bindTexture(gl.TEXTURE_2D, texture);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, currentSize, currentSize, 0, gl.RGBA, gl.FLOAT, null);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, textureSize, textureSize, 0, gl.RGBA, gl.FLOAT, null);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -229,17 +246,17 @@ export default class PlanM {
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
       gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
       
-      this.levelTextures.push({texture, size: currentSize});
+      this.levelTextures.push({texture, size: textureSize, gridSize});
       this.levelFramebuffers.push(framebuffer);
       
-      currentSize = Math.max(1, Math.floor(currentSize / 2));
+      console.log(`  Created octree level ${i}: grid=${gridSize}³, texture=${textureSize}×${textureSize}`);
     }
     
     this.positionTextures = this.createPingPongTextures(this.textureWidth, this.textureHeight);
     this.velocityTextures = this.createPingPongTextures(this.textureWidth, this.textureHeight);
     this.forceTexture = this.createRenderTexture(this.textureWidth, this.textureHeight);
     
-    console.log(`Created ${this.numLevels} quadtree level textures and particle textures`);
+    console.log(`Created ${this.numLevels} octree level textures and particle textures`);
   }
 
   createPingPongTextures(width, height) {
@@ -325,6 +342,12 @@ export default class PlanM {
     gl.vertexAttribPointer(0, 1, gl.FLOAT, false, 0, 0);
     
     gl.bindVertexArray(null);
+    
+    // Create minimal VAO for aggregation (no attributes, just to trigger vertex count)
+    this.aggregationVAO = gl.createVertexArray();
+    gl.bindVertexArray(this.aggregationVAO);
+    gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);  // Bind buffer but don't enable attributes
+    gl.bindVertexArray(null);
   }
 
   initializeParticles() {
@@ -333,22 +356,31 @@ export default class PlanM {
     
     const bounds = this.options.worldBounds;
     const center = [
-      (bounds.xMin + bounds.xMax) / 2,
-      (bounds.yMin + bounds.yMax) / 2,
-      (bounds.zMin + bounds.zMax) / 2
+      (bounds.min[0] + bounds.max[0]) / 2,
+      (bounds.min[1] + bounds.max[1]) / 2,
+      (bounds.min[2] + bounds.max[2]) / 2
     ];
     const speed = (this.options.initialSpeed !== undefined) ? this.options.initialSpeed : 0.05;
     
     for (let i = 0; i < this.options.particleCount; i++) {
       const base = i * 4;
       
-      const angle = Math.random() * Math.PI * 2;
-      const radius = Math.random() * 3 + Math.random() * 1;
-      const height = (Math.random() - 0.5) * 2;
+      // Uniform spherical distribution using Marsaglia's method
+      let x, y, z, r2;
+      do {
+        x = Math.random() * 2 - 1;
+        y = Math.random() * 2 - 1;
+        z = Math.random() * 2 - 1;
+        r2 = x*x + y*y + z*z;
+      } while (r2 > 1 || r2 < 0.01);
       
-      positions[base + 0] = center[0] + Math.cos(angle) * radius;
-      positions[base + 1] = center[1] + Math.sin(angle) * radius;
-      positions[base + 2] = center[2] + height;
+      // Scale to desired radius (0 to 4 units like before)
+      const radius = Math.random() * 3 + Math.random() * 1;
+      const scale = radius / Math.sqrt(r2);
+      
+      positions[base + 0] = center[0] + x * scale;
+      positions[base + 1] = center[1] + y * scale;
+      positions[base + 2] = center[2] + z * scale;
       positions[base + 3] = 0.5 + Math.random() * 1.5; // mass: random range 0.5 to 2.0
       velocities[base + 0] = (Math.random() - 0.5) * 2.0 * speed;
       velocities[base + 1] = (Math.random() - 0.5) * 2.0 * speed;
@@ -368,21 +400,26 @@ export default class PlanM {
       velocities[base + 3] = 0;
     }
     
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
     for (let i = 0; i < this.options.particleCount; i++) {
       const base = i * 4;
       const x = positions[base + 0];
       const y = positions[base + 1];
+      const z = positions[base + 2];
       if (x < minX) minX = x;
       if (y < minY) minY = y;
+      if (z < minZ) minZ = z;
       if (x > maxX) maxX = x;
       if (y > maxY) maxY = y;
+      if (z > maxZ) maxZ = z;
     }
     const padX = Math.max(0.5, 0.1 * Math.max(1e-6, (maxX - minX)));
     const padY = Math.max(0.5, 0.1 * Math.max(1e-6, (maxY - minY)));
+    const padZ = Math.max(0.5, 0.1 * Math.max(1e-6, (maxZ - minZ)));
     this.options.worldBounds = {
-      min: [minX - padX, minY - padY, this.options.worldBounds.zMin],
-      max: [maxX + padX, maxY + padY, this.options.worldBounds.zMax]
+      min: [minX - padX, minY - padY, minZ - padZ],
+      max: [maxX + padX, maxY + padY, maxZ + padZ]
     };
 
     this.uploadTextureData(this.positionTextures.textures[0], positions);
@@ -394,7 +431,7 @@ export default class PlanM {
     console.log(`Initial particle 0: pos=[${positions[0].toFixed(2)}, ${positions[1].toFixed(2)}, ${positions[2].toFixed(2)}] mass=${positions[3]}`);
     console.log(`Initial velocity 0: vel=[${velocities[0].toFixed(3)}, ${velocities[1].toFixed(3)}, ${velocities[2].toFixed(3)}]`);
     console.log(`World bounds after init:`, this.options.worldBounds);
-    console.log(`Bounds range: X=[${minX.toFixed(2)}, ${maxX.toFixed(2)}] Y=[${minY.toFixed(2)}, ${maxY.toFixed(2)}]`);
+    console.log(`Bounds range: X=[${minX.toFixed(2)}, ${maxX.toFixed(2)}] Y=[${minY.toFixed(2)}, ${maxY.toFixed(2)}] Z=[${minZ.toFixed(2)}, ${maxZ.toFixed(2)}]`);
   }
 
   uploadTextureData(texture, data) {
@@ -465,6 +502,7 @@ export default class PlanM {
     const gl = this.gl;
     this.unbindAllTextures();
 
+    gl.disable(gl.SCISSOR_TEST);
     for (let i = 0; i < this.numLevels; i++) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.levelFramebuffers[i]);
       gl.viewport(0, 0, this.levelTextures[i].size, this.levelTextures[i].size);
@@ -486,6 +524,7 @@ export default class PlanM {
   clearForceTexture() {
     const gl = this.gl;
     this.unbindAllTextures();
+    gl.disable(gl.SCISSOR_TEST);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.forceTexture.framebuffer);
     gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
     gl.viewport(0, 0, this.textureWidth, this.textureHeight);

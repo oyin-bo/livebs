@@ -1,6 +1,16 @@
 // Barnes–Hut traversal to compute force texture
 export function calculateForces(ctx) {
   const gl = ctx.gl;
+  
+  // DEBUG: Check L0 before force calculation
+  if (ctx.frameCount < 3) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, ctx.levelFramebuffers[0]);
+    const L0data = new Float32Array(32); // 8 voxels * 4 components
+    gl.readPixels(0, 0, 8, 1, gl.RGBA, gl.FLOAT, L0data);
+    console.log(`[DEBUG Frame ${ctx.frameCount}] L0 BEFORE force calc - masses: [${L0data[3].toFixed(4)}, ${L0data[7].toFixed(4)}, ${L0data[11].toFixed(4)}, ${L0data[15].toFixed(4)}, ${L0data[19].toFixed(4)}, ${L0data[23].toFixed(4)}, ${L0data[27].toFixed(4)}, ${L0data[31].toFixed(4)}]`);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+  
   gl.useProgram(ctx.programs.traversal);
   // Avoid feedback
   ctx.unbindAllTextures();
@@ -10,7 +20,6 @@ export function calculateForces(ctx) {
   gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
   gl.viewport(0, 0, ctx.textureWidth, ctx.textureHeight);
   gl.disable(gl.SCISSOR_TEST);
-  gl.scissor(0, 0, ctx.textureWidth, ctx.textureHeight);
 
   // Bind particle positions
   gl.activeTexture(gl.TEXTURE0);
@@ -30,15 +39,21 @@ export function calculateForces(ctx) {
   gl.uniform1i(gl.getUniformLocation(ctx.programs.traversal, 'u_numLevels'), ctx.numLevels);
   gl.uniform2f(gl.getUniformLocation(ctx.programs.traversal, 'u_texSize'), ctx.textureWidth, ctx.textureHeight);
   gl.uniform1i(gl.getUniformLocation(ctx.programs.traversal, 'u_particleCount'), ctx.options.particleCount);
-  gl.uniform2f(gl.getUniformLocation(ctx.programs.traversal, 'u_worldMin'), ctx.options.worldBounds.min[0], ctx.options.worldBounds.min[1]);
-  gl.uniform2f(gl.getUniformLocation(ctx.programs.traversal, 'u_worldMax'), ctx.options.worldBounds.max[0], ctx.options.worldBounds.max[1]);
+  gl.uniform3f(gl.getUniformLocation(ctx.programs.traversal, 'u_worldMin'), ctx.options.worldBounds.min[0], ctx.options.worldBounds.min[1], ctx.options.worldBounds.min[2]);
+  gl.uniform3f(gl.getUniformLocation(ctx.programs.traversal, 'u_worldMax'), ctx.options.worldBounds.max[0], ctx.options.worldBounds.max[1], ctx.options.worldBounds.max[2]);
   gl.uniform1f(gl.getUniformLocation(ctx.programs.traversal, 'u_softening'), ctx.options.softening);
   gl.uniform1f(gl.getUniformLocation(ctx.programs.traversal, 'u_G'), ctx.options.gravityStrength);
+  gl.uniform1i(gl.getUniformLocation(ctx.programs.traversal, 'u_textureWidth'), ctx.levelTextures[0].size);
 
-  // Cell sizes per level
+  // Cell sizes per level (3D diagonal of voxel)
   const cellSizes = new Float32Array(8);
-  const worldSize = ctx.options.worldBounds.max[0] - ctx.options.worldBounds.min[0];
-  let size = worldSize / ctx.L0Size;
+  const worldExtent = [
+    ctx.options.worldBounds.max[0] - ctx.options.worldBounds.min[0],
+    ctx.options.worldBounds.max[1] - ctx.options.worldBounds.min[1],
+    ctx.options.worldBounds.max[2] - ctx.options.worldBounds.min[2]
+  ];
+  const maxExtent = Math.max(worldExtent[0], worldExtent[1], worldExtent[2]);
+  let size = maxExtent / ctx.octreeGridSize; // Size of L0 voxel
   for (let i = 0; i < 8; i++) { cellSizes[i] = size; size *= 2.0; }
   gl.uniform1fv(gl.getUniformLocation(ctx.programs.traversal, 'u_cellSizes'), cellSizes);
 
