@@ -1,13 +1,14 @@
 export default `#version 300 es
 precision highp float;
 
-// Use gl_VertexID instead of attribute for robust indexing
+// Octree 3D aggregation with Z-slice stacking
 
 uniform sampler2D u_positions;   // RGBA: xyz + mass
 uniform vec2 u_texSize;          // positions texture size
-uniform vec2 u_worldMin;         // XY world min
-uniform vec2 u_worldMax;         // XY world max
-uniform float u_gridSize;        // L0 size (square)
+uniform vec3 u_worldMin;         // XYZ world min
+uniform vec3 u_worldMax;         // XYZ world max
+uniform float u_gridSize;        // octree grid size (e.g., 64)
+uniform float u_slicesPerRow;    // slices per row (e.g., 8 for 8x8 grid)
 
 out vec4 v_particleData;
 
@@ -16,6 +17,24 @@ ivec2 indexToCoord(int index, vec2 texSize) {
   int ix = index % w;
   int iy = index / w;
   return ivec2(ix, iy);
+}
+
+// Convert 3D voxel coordinate to 2D texture coordinate
+vec2 voxelToTexel(vec3 voxelCoord, float gridSize, float slicesPerRow) {
+  float vx = voxelCoord.x;
+  float vy = voxelCoord.y;
+  float vz = voxelCoord.z;
+  
+  // Which Z-slice?
+  float sliceIndex = vz;
+  float sliceRow = floor(sliceIndex / slicesPerRow);
+  float sliceCol = mod(sliceIndex, slicesPerRow);
+  
+  // Texel position
+  float texelX = sliceCol * gridSize + vx;
+  float texelY = sliceRow * gridSize + vy;
+  
+  return vec2(texelX, texelY);
 }
 
 void main() {
@@ -32,16 +51,20 @@ void main() {
     return;
   }
 
-  // Map to grid texel
-  vec2 norm = (pos.xy - u_worldMin) / (u_worldMax - u_worldMin);
-  norm = clamp(norm, vec2(0.0), vec2(1.0 - (1.0 / u_gridSize)));
-  vec2 gridCoord = floor(norm * u_gridSize);
-  vec2 texelCenter = (gridCoord + 0.5) / u_gridSize;
+  // Map particle XYZ to 3D voxel grid
+  vec3 norm = (pos.xyz - u_worldMin) / (u_worldMax - u_worldMin);
+  norm = clamp(norm, vec3(0.0), vec3(1.0 - (1.0 / u_gridSize)));
+  vec3 voxelCoord = floor(norm * u_gridSize);
+  
+  // Convert 3D voxel to 2D texture coordinate
+  float textureSize = u_gridSize * u_slicesPerRow;
+  vec2 texelPos = voxelToTexel(voxelCoord, u_gridSize, u_slicesPerRow);
+  vec2 texelCenter = (texelPos + 0.5) / textureSize;
   vec2 clip = texelCenter * 2.0 - 1.0;
 
   gl_Position = vec4(clip, 0.0, 1.0);
   gl_PointSize = 1.0;
 
-  // Weighted sum and counters
-  v_particleData = vec4(pos.xy * mass, mass, 1.0);
+  // Weighted sum: store 3D weighted position and mass
+  v_particleData = vec4(pos.xyz * mass, mass);
 }`;

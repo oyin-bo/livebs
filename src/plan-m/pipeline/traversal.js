@@ -30,17 +30,49 @@ export function calculateForces(ctx) {
   gl.uniform1i(gl.getUniformLocation(ctx.programs.traversal, 'u_numLevels'), ctx.numLevels);
   gl.uniform2f(gl.getUniformLocation(ctx.programs.traversal, 'u_texSize'), ctx.textureWidth, ctx.textureHeight);
   gl.uniform1i(gl.getUniformLocation(ctx.programs.traversal, 'u_particleCount'), ctx.options.particleCount);
-  gl.uniform2f(gl.getUniformLocation(ctx.programs.traversal, 'u_worldMin'), ctx.options.worldBounds.min[0], ctx.options.worldBounds.min[1]);
-  gl.uniform2f(gl.getUniformLocation(ctx.programs.traversal, 'u_worldMax'), ctx.options.worldBounds.max[0], ctx.options.worldBounds.max[1]);
+  gl.uniform3f(gl.getUniformLocation(ctx.programs.traversal, 'u_worldMin'), 
+    ctx.options.worldBounds.min[0], 
+    ctx.options.worldBounds.min[1],
+    ctx.options.worldBounds.min[2]);
+  gl.uniform3f(gl.getUniformLocation(ctx.programs.traversal, 'u_worldMax'), 
+    ctx.options.worldBounds.max[0], 
+    ctx.options.worldBounds.max[1],
+    ctx.options.worldBounds.max[2]);
   gl.uniform1f(gl.getUniformLocation(ctx.programs.traversal, 'u_softening'), ctx.options.softening);
   gl.uniform1f(gl.getUniformLocation(ctx.programs.traversal, 'u_G'), ctx.options.gravityStrength);
 
-  // Cell sizes per level
+  // Cell sizes, grid sizes, and slices per row per level
   const cellSizes = new Float32Array(8);
-  const worldSize = ctx.options.worldBounds.max[0] - ctx.options.worldBounds.min[0];
-  let size = worldSize / ctx.L0Size;
-  for (let i = 0; i < 8; i++) { cellSizes[i] = size; size *= 2.0; }
+  const gridSizes = new Float32Array(8);
+  const slicesPerRow = new Float32Array(8);
+  
+  // World extent (use max dimension for isotropic cell size)
+  const worldExtent = [
+    ctx.options.worldBounds.max[0] - ctx.options.worldBounds.min[0],
+    ctx.options.worldBounds.max[1] - ctx.options.worldBounds.min[1],
+    ctx.options.worldBounds.max[2] - ctx.options.worldBounds.min[2]
+  ];
+  const worldSize = Math.max(...worldExtent);
+  
+  // Calculate per-level parameters
+  let currentGridSize = ctx.octreeGridSize;
+  let currentSlicesPerRow = ctx.octreeSlicesPerRow;
+  let cellSize = worldSize / currentGridSize;
+  
+  for (let i = 0; i < 8; i++) {
+    cellSizes[i] = cellSize;
+    gridSizes[i] = currentGridSize;
+    slicesPerRow[i] = currentSlicesPerRow;
+    
+    // Next level: halve grid dimensions
+    currentGridSize = Math.max(1, Math.floor(currentGridSize / 2));
+    currentSlicesPerRow = Math.max(1, Math.floor(currentSlicesPerRow / 2));
+    cellSize *= 2.0;
+  }
+  
   gl.uniform1fv(gl.getUniformLocation(ctx.programs.traversal, 'u_cellSizes'), cellSizes);
+  gl.uniform1fv(gl.getUniformLocation(ctx.programs.traversal, 'u_gridSizes'), gridSizes);
+  gl.uniform1fv(gl.getUniformLocation(ctx.programs.traversal, 'u_slicesPerRow'), slicesPerRow);
 
   // Draw quad
   console.log('Plan M draw: calculateForces');

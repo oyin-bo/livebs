@@ -40,10 +40,19 @@ export function aggregateParticlesIntoL0(ctx) {
   const u_worldMin = gl.getUniformLocation(ctx.programs.aggregation, 'u_worldMin');
   const u_worldMax = gl.getUniformLocation(ctx.programs.aggregation, 'u_worldMax');
   const u_gridSize = gl.getUniformLocation(ctx.programs.aggregation, 'u_gridSize');
+  const u_slicesPerRow = gl.getUniformLocation(ctx.programs.aggregation, 'u_slicesPerRow');
+  
   gl.uniform2f(u_texSize, ctx.textureWidth, ctx.textureHeight);
-  gl.uniform2f(u_worldMin, ctx.options.worldBounds.min[0], ctx.options.worldBounds.min[1]);
-  gl.uniform2f(u_worldMax, ctx.options.worldBounds.max[0], ctx.options.worldBounds.max[1]);
-  gl.uniform1f(u_gridSize, L0);
+  gl.uniform3f(u_worldMin, 
+    ctx.options.worldBounds.min[0], 
+    ctx.options.worldBounds.min[1],
+    ctx.options.worldBounds.min[2]);
+  gl.uniform3f(u_worldMax, 
+    ctx.options.worldBounds.max[0], 
+    ctx.options.worldBounds.max[1],
+    ctx.options.worldBounds.max[2]);
+  gl.uniform1f(u_gridSize, ctx.octreeGridSize);
+  gl.uniform1f(u_slicesPerRow, ctx.octreeSlicesPerRow);
   ctx.checkGl('aggregate L0 (after set uniforms)');
 
   // Assert we're not simultaneously sampling and rendering into the same texture

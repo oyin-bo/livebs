@@ -61,8 +61,14 @@ export function renderParticles(ctx) {
     gl.uniform2f(u_texSize, ctx.textureWidth, ctx.textureHeight);
     gl.uniform1f(u_pointSize, ctx.options.pointSize);
     if (u_projectionView) gl.uniformMatrix4fv(u_projectionView, false, projectionViewMatrix);
-    if (u_worldMin) gl.uniform2f(u_worldMin, ctx.options.worldBounds.min[0], ctx.options.worldBounds.min[1]);
-    if (u_worldMax) gl.uniform2f(u_worldMax, ctx.options.worldBounds.max[0], ctx.options.worldBounds.max[1]);
+    if (u_worldMin) gl.uniform3f(u_worldMin, 
+      ctx.options.worldBounds.min[0], 
+      ctx.options.worldBounds.min[1],
+      ctx.options.worldBounds.min[2]);
+    if (u_worldMax) gl.uniform3f(u_worldMax, 
+      ctx.options.worldBounds.max[0], 
+      ctx.options.worldBounds.max[1],
+      ctx.options.worldBounds.max[2]);
 
     // Blending for particles
     gl.enable(gl.BLEND);

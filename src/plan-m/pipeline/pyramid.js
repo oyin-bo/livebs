@@ -17,7 +17,12 @@ export function runReductionPass(ctx, sourceLevel, targetLevel) {
   gl.bindTexture(gl.TEXTURE_2D, ctx.levelTextures[sourceLevel].texture);
   
   const u_previousLevel = gl.getUniformLocation(ctx.programs.reduction, 'u_previousLevel');
+  const u_gridSize = gl.getUniformLocation(ctx.programs.reduction, 'u_gridSize');
+  const u_slicesPerRow = gl.getUniformLocation(ctx.programs.reduction, 'u_slicesPerRow');
+  
   gl.uniform1i(u_previousLevel, 0);
+  gl.uniform1f(u_gridSize, ctx.levelTextures[targetLevel].gridSize);
+  gl.uniform1f(u_slicesPerRow, ctx.levelTextures[targetLevel].slicesPerRow);
   
   // Render full-screen quad
   console.log(`Plan M draw: reduction ${sourceLevel}->${targetLevel}`);

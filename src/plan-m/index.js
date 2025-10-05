@@ -1,8 +1,9 @@
 /**
- * Plan M: "The Menace" — GPU-side Dynamic Quadtree
+ * Plan M: "The Menace" — GPU-side Dynamic Octree
  * 
- * Implements a GPU-resident quadtree using WebGL2 fragment shaders for large-scale
+ * Implements a GPU-resident octree using WebGL2 fragment shaders for large-scale
  * particle simulation with O(N log N) complexity via Barnes-Hut algorithm.
+ * Uses isotropic 3D treatment of X/Y/Z axes with Z-slice stacking for 2D texture mapping.
  */
 
 import * as THREE from 'three';
@@ -35,7 +36,8 @@ export default class PlanM {
     this.options = {
       particleCount: 5000,
       worldBounds: {
-        xMin: -4, xMax: 4, yMin: -4, yMax: 4, zMin: 0, zMax: 2
+        min: [-4, -4, 0],
+        max: [4, 4, 2]
       },
       theta: 0.5,
       pointSize: 10.0,
@@ -143,17 +145,25 @@ export default class PlanM {
   }
 
   calculateTextureDimensions() {
-    const desired = Math.max(64, Math.ceil(Math.sqrt(this.options.particleCount * 4)));
-    const nextPow2 = Math.pow(2, Math.ceil(Math.log2(desired)));
-    const maxTex = this.gl.getParameter(this.gl.MAX_TEXTURE_SIZE);
-    this.L0Size = Math.min(nextPow2, maxTex);
-    this.numLevels = Math.min(8, Math.ceil(Math.log2(this.L0Size)) + 1);
+    // Octree configuration: 64³ voxels with Z-slice stacking
+    this.octreeGridSize = 64; // 64x64x64 3D grid
+    this.octreeSlicesPerRow = 8; // 8x8 grid of Z-slices
+    this.numLevels = 7; // 64 → 32 → 16 → 8 → 4 → 2 → 1
     
+    // L0 texture size: gridSize * slicesPerRow (64 * 8 = 512)
+    this.L0Size = this.octreeGridSize * this.octreeSlicesPerRow;
+    const maxTex = this.gl.getParameter(this.gl.MAX_TEXTURE_SIZE);
+    if (this.L0Size > maxTex) {
+      throw new Error(`Octree L0 size ${this.L0Size} exceeds max texture size ${maxTex}`);
+    }
+    
+    // Particle texture dimensions (unchanged)
     this.textureWidth = Math.ceil(Math.sqrt(this.options.particleCount));
     this.textureHeight = Math.ceil(this.options.particleCount / this.textureWidth);
     this.actualTextureSize = this.textureWidth * this.textureHeight;
     
-    console.log(`Quadtree: L0=${this.L0Size}x${this.L0Size}, ${this.numLevels} levels`);
+    console.log(`Octree: L0=${this.octreeGridSize}³ voxels (${this.L0Size}x${this.L0Size} texture), ${this.numLevels} levels`);
+    console.log(`Z-slice stacking: ${this.octreeSlicesPerRow}x${this.octreeSlicesPerRow} grid of ${this.octreeGridSize} slices`);
     console.log(`Position texture: ${this.textureWidth}x${this.textureHeight} for ${this.options.particleCount} particles (${this.actualTextureSize} total texels)`);
   }
 
@@ -214,7 +224,12 @@ export default class PlanM {
     this.levelTextures = [];
     this.levelFramebuffers = [];
     
+    // Octree levels: each level reduces voxel grid by 2 in each dimension
+    // In 2D texture layout, this means texture size reduces by 2 (8x8 slices → 4x4 slices)
     let currentSize = this.L0Size;
+    let currentGridSize = this.octreeGridSize;
+    let currentSlicesPerRow = this.octreeSlicesPerRow;
+    
     for (let i = 0; i < this.numLevels; i++) {
       const texture = gl.createTexture();
       gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -229,17 +244,25 @@ export default class PlanM {
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
       gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
       
-      this.levelTextures.push({texture, size: currentSize});
+      this.levelTextures.push({
+        texture, 
+        size: currentSize, 
+        gridSize: currentGridSize,
+        slicesPerRow: currentSlicesPerRow
+      });
       this.levelFramebuffers.push(framebuffer);
       
-      currentSize = Math.max(1, Math.floor(currentSize / 2));
+      // Next level: voxel grid halves in all dimensions
+      currentGridSize = Math.max(1, Math.floor(currentGridSize / 2));
+      currentSlicesPerRow = Math.max(1, Math.floor(currentSlicesPerRow / 2));
+      currentSize = currentGridSize * currentSlicesPerRow;
     }
     
     this.positionTextures = this.createPingPongTextures(this.textureWidth, this.textureHeight);
     this.velocityTextures = this.createPingPongTextures(this.textureWidth, this.textureHeight);
     this.forceTexture = this.createRenderTexture(this.textureWidth, this.textureHeight);
     
-    console.log(`Created ${this.numLevels} quadtree level textures and particle textures`);
+    console.log(`Created ${this.numLevels} octree level textures and particle textures`);
   }
 
   createPingPongTextures(width, height) {
@@ -333,9 +356,9 @@ export default class PlanM {
     
     const bounds = this.options.worldBounds;
     const center = [
-      (bounds.xMin + bounds.xMax) / 2,
-      (bounds.yMin + bounds.yMax) / 2,
-      (bounds.zMin + bounds.zMax) / 2
+      (bounds.min[0] + bounds.max[0]) / 2,
+      (bounds.min[1] + bounds.max[1]) / 2,
+      (bounds.min[2] + bounds.max[2]) / 2
     ];
     const speed = (this.options.initialSpeed !== undefined) ? this.options.initialSpeed : 0.05;
     
@@ -381,8 +404,8 @@ export default class PlanM {
     const padX = Math.max(0.5, 0.1 * Math.max(1e-6, (maxX - minX)));
     const padY = Math.max(0.5, 0.1 * Math.max(1e-6, (maxY - minY)));
     this.options.worldBounds = {
-      min: [minX - padX, minY - padY, this.options.worldBounds.zMin],
-      max: [maxX + padX, maxY + padY, this.options.worldBounds.zMax]
+      min: [minX - padX, minY - padY, this.options.worldBounds.min[2]],
+      max: [maxX + padX, maxY + padY, this.options.worldBounds.max[2]]
     };
 
     this.uploadTextureData(this.positionTextures.textures[0], positions);

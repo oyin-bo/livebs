@@ -1,6 +1,8 @@
 export default `#version 300 es
 precision highp float;
 
+// 3D isotropic octree traversal with Barnes-Hut
+
 uniform sampler2D u_particlePositions;
 uniform sampler2D u_quadtreeLevel0;
 uniform sampler2D u_quadtreeLevel1;
@@ -13,10 +15,12 @@ uniform sampler2D u_quadtreeLevel7;
 uniform float u_theta;
 uniform int u_numLevels;
 uniform float u_cellSizes[8];
+uniform float u_gridSizes[8];         // voxel grid sizes per level
+uniform float u_slicesPerRow[8];      // slices per row per level
 uniform vec2 u_texSize;
 uniform int u_particleCount;
-uniform vec2 u_worldMin;
-uniform vec2 u_worldMax;
+uniform vec3 u_worldMin;
+uniform vec3 u_worldMax;
 uniform float u_softening;
 uniform float u_G;
 
@@ -34,16 +38,22 @@ vec4 sampleLevel(int level, ivec2 coord) {
   else { return vec4(0.0); }
 }
 
-ivec2 getLevelSize(int level) {
-  if (level == 0) { return textureSize(u_quadtreeLevel0, 0); }
-  else if (level == 1) { return textureSize(u_quadtreeLevel1, 0); }
-  else if (level == 2) { return textureSize(u_quadtreeLevel2, 0); }
-  else if (level == 3) { return textureSize(u_quadtreeLevel3, 0); }
-  else if (level == 4) { return textureSize(u_quadtreeLevel4, 0); }
-  else if (level == 5) { return textureSize(u_quadtreeLevel5, 0); }
-  else if (level == 6) { return textureSize(u_quadtreeLevel6, 0); }
-  else if (level == 7) { return textureSize(u_quadtreeLevel7, 0); }
-  else { return ivec2(1); }
+// Convert 3D voxel coordinate to 2D texture coordinate
+ivec2 voxelToTexel(ivec3 voxelCoord, float gridSize, float slicesPerRow) {
+  int vx = voxelCoord.x;
+  int vy = voxelCoord.y;
+  int vz = voxelCoord.z;
+  
+  // Which Z-slice?
+  int sliceIndex = vz;
+  int sliceRow = sliceIndex / int(slicesPerRow);
+  int sliceCol = sliceIndex - sliceRow * int(slicesPerRow);
+  
+  // Texel position
+  int texelX = sliceCol * int(gridSize) + vx;
+  int texelY = sliceRow * int(gridSize) + vy;
+  
+  return ivec2(texelX, texelY);
 }
 
 void main() {
@@ -58,76 +68,105 @@ void main() {
   vec3 myPos = texture(u_particlePositions, myUV).xyz;
   vec3 totalForce = vec3(0.0);
 
-  vec2 worldExtent = u_worldMax - u_worldMin;
+  vec3 worldExtent = u_worldMax - u_worldMin;
   float eps = max(u_softening, 1e-6);
 
+  // Traverse octree levels from coarsest to finest
   for (int level = min(u_numLevels - 1, 7); level >= 0; level--) {
-    ivec2 levelSize = getLevelSize(level);
+    float gridSize = u_gridSizes[level];
+    float slicesPerRow = u_slicesPerRow[level];
     float cellSize = u_cellSizes[level];
 
-    // Special case: root level, sample the only node
-    if (levelSize.x == 1 && levelSize.y == 1) {
-      vec4 root = sampleLevel(level, ivec2(0));
-      float massSum = root.b;
+    // Special case: root level (1×1×1 voxel)
+    if (gridSize == 1.0) {
+      vec4 root = sampleLevel(level, ivec2(0, 0));
+      float massSum = root.a;
       if (massSum > 0.0) {
-        vec2 com = root.rg / max(massSum, 1e-6);
-        float d = length(com - myPos.xy);
+        vec3 com = root.rgb / max(massSum, 1e-6);
+        vec3 delta = com - myPos;
+        float d = length(delta);
         float s = cellSize;
         if ((s / max(d, eps)) < u_theta) {
-          vec2 dir = com - myPos.xy;
-          float inv = 1.0 / (d * d + eps);
-          totalForce.xy += normalize(dir) * massSum * inv;
+          // Approximate: use COM
+          float inv = 1.0 / (d * d + eps * eps);
+          totalForce += normalize(delta) * massSum * inv;
         }
       }
       continue;
     }
 
-    // Find my node coordinate at this level
-    vec2 norm = (myPos.xy - u_worldMin) / worldExtent;
-    ivec2 myNode = ivec2(floor(clamp(norm, vec2(0.0), vec2(1.0 - (1.0 / vec2(levelSize)))) * vec2(levelSize)));
+    // Find my voxel coordinate at this level
+    vec3 norm = (myPos - u_worldMin) / worldExtent;
+    norm = clamp(norm, vec3(0.0), vec3(1.0 - (1.0 / gridSize)));
+    ivec3 myVoxel = ivec3(floor(norm * gridSize));
 
-    // Sample a 1-ring neighborhood to gather far contributions
+    // Sample a 3D neighborhood cube (27 voxels - 1 center = 26 voxels)
     const int R = 1;
-    for (int dy = -R; dy <= R; dy++) {
-      for (int dx = -R; dx <= R; dx++) {
-        if (dx == 0 && dy == 0) { continue; }
-        if (max(abs(dx), abs(dy)) != R) { continue; }
-        ivec2 n = myNode + ivec2(dx, dy);
-        if (n.x < 0 || n.y < 0 || n.x >= levelSize.x || n.y >= levelSize.y) { continue; }
-        vec4 nodeData = sampleLevel(level, n);
-        float m = nodeData.b;
-        if (m <= 0.0) { continue; }
-        vec2 com = nodeData.rg / max(m, 1e-6);
-        float d = length(com - myPos.xy);
-        float s = cellSize;
-        if ((s / max(d, eps)) < u_theta) {
-          vec2 dir = com - myPos.xy;
-          float inv = 1.0 / (d * d + eps*eps);
-          totalForce.xy += normalize(dir) * m * inv;
+    for (int dz = -R; dz <= R; dz++) {
+      for (int dy = -R; dy <= R; dy++) {
+        for (int dx = -R; dx <= R; dx++) {
+          if (dx == 0 && dy == 0 && dz == 0) { continue; } // Skip center
+          if (max(max(abs(dx), abs(dy)), abs(dz)) != R) { continue; } // Only outer shell
+          
+          ivec3 neighborVoxel = myVoxel + ivec3(dx, dy, dz);
+          
+          // Bounds check
+          if (neighborVoxel.x < 0 || neighborVoxel.y < 0 || neighborVoxel.z < 0 ||
+              neighborVoxel.x >= int(gridSize) || neighborVoxel.y >= int(gridSize) || neighborVoxel.z >= int(gridSize)) {
+            continue;
+          }
+          
+          ivec2 texCoord = voxelToTexel(neighborVoxel, gridSize, slicesPerRow);
+          vec4 nodeData = sampleLevel(level, texCoord);
+          float m = nodeData.a;
+          if (m <= 0.0) { continue; }
+          
+          vec3 com = nodeData.rgb / max(m, 1e-6);
+          vec3 delta = com - myPos;
+          float d = length(delta);
+          float s = cellSize;
+          
+          if ((s / max(d, eps)) < u_theta) {
+            // Approximate: use COM
+            float inv = 1.0 / (d * d + eps * eps);
+            totalForce += normalize(delta) * m * inv;
+          }
         }
       }
     }
   }
 
-  // Local near-field from L0 small neighborhood (3x3 excluding center) for anisotropy
+  // Near-field: sample L0 local neighborhood (3×3×3 - 1 = 26 voxels)
   {
-    ivec2 L0Size = textureSize(u_quadtreeLevel0, 0);
-    vec2 norm = (myPos.xy - u_worldMin) / worldExtent;
-    ivec2 myL0 = ivec2(floor(clamp(norm, vec2(0.0), vec2(1.0 - (1.0 / vec2(L0Size)))) * vec2(L0Size)));
-    const int R0 = 1; // 3x3 neighborhood
-    for (int dy = -R0; dy <= R0; dy++) {
-      for (int dx = -R0; dx <= R0; dx++) {
-        if (dx == 0 && dy == 0) { continue; }
-        ivec2 n = myL0 + ivec2(dx, dy);
-        if (n.x < 0 || n.y < 0 || n.x >= L0Size.x || n.y >= L0Size.y) { continue; }
-        vec4 nodeData = texelFetch(u_quadtreeLevel0, n, 0);
-        float m = nodeData.b;
-        if (m <= 0.0) { continue; }
-        vec2 com = nodeData.rg / max(m, 1e-6);
-        vec2 dir = com - myPos.xy;
-        float d = length(dir);
-        float inv = 1.0 / (d * d + eps*eps);
-        totalForce.xy += normalize(dir) * m * inv;
+    float gridSize = u_gridSizes[0];
+    float slicesPerRow = u_slicesPerRow[0];
+    vec3 norm = (myPos - u_worldMin) / worldExtent;
+    norm = clamp(norm, vec3(0.0), vec3(1.0 - (1.0 / gridSize)));
+    ivec3 myL0Voxel = ivec3(floor(norm * gridSize));
+    
+    const int R0 = 1;
+    for (int dz = -R0; dz <= R0; dz++) {
+      for (int dy = -R0; dy <= R0; dy++) {
+        for (int dx = -R0; dx <= R0; dx++) {
+          if (dx == 0 && dy == 0 && dz == 0) { continue; }
+          
+          ivec3 neighborVoxel = myL0Voxel + ivec3(dx, dy, dz);
+          if (neighborVoxel.x < 0 || neighborVoxel.y < 0 || neighborVoxel.z < 0 ||
+              neighborVoxel.x >= int(gridSize) || neighborVoxel.y >= int(gridSize) || neighborVoxel.z >= int(gridSize)) {
+            continue;
+          }
+          
+          ivec2 texCoord = voxelToTexel(neighborVoxel, gridSize, slicesPerRow);
+          vec4 nodeData = sampleLevel(0, texCoord);
+          float m = nodeData.a;
+          if (m <= 0.0) { continue; }
+          
+          vec3 com = nodeData.rgb / max(m, 1e-6);
+          vec3 delta = com - myPos;
+          float d = length(delta);
+          float inv = 1.0 / (d * d + eps * eps);
+          totalForce += normalize(delta) * m * inv;
+        }
       }
     }
   }
