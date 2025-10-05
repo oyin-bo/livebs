@@ -82,6 +82,10 @@ export function renderParticles(ctx) {
 
     gl.disable(gl.BLEND);
     gl.disable(gl.DEPTH_TEST);
+    
+    // Unbind textures to avoid conflicts
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, null);
 
     if (ctx.frameCount < 3) {
       console.log(`Plan M: Rendered ${ctx.options.particleCount} particles at frame ${ctx.frameCount}`);

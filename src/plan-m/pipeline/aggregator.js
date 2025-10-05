@@ -2,6 +2,10 @@
 // Each particle contributes: (sum_x, sum_y, mass, count)
 export function aggregateParticlesIntoL0(ctx) {
   const gl = ctx.gl;
+  
+  // Clear any pending GL errors from previous operations (e.g., Three.js)
+  while (gl.getError() !== gl.NO_ERROR) {}
+  
   gl.useProgram(ctx.programs.aggregation);
 
   // Avoid feedback: ensure no textures are bound except the ones we set below
