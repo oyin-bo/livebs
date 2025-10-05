@@ -27563,41 +27563,369 @@ ${source}`);
     }
   };
 
-  // src/plan-m/index.js
-  var vertexShaderSource = `#version 300 es
+  // src/plan-m/shaders/fullscreen.vert.js
+  var fullscreen_vert_default = `#version 300 es
 precision highp float;
 
-in vec2 a_position;
+layout(location=0) in vec2 a_position;
 
 void main() {
   gl_Position = vec4(a_position, 0.0, 1.0);
 }`;
-  var reductionFragmentShader = `#version 300 es
+
+  // src/plan-m/shaders/reduction.frag.js
+  var reduction_frag_default = `#version 300 es
 precision highp float;
 
 uniform sampler2D u_previousLevel;
+uniform float u_gridSize;       // current level grid size (e.g., 32 for L1)
+uniform float u_slicesPerRow;   // slices per row for current level (e.g., 4 for L1)
 
 out vec4 fragColor;
+
+// Convert 3D voxel coordinate to 2D texture coordinate
+ivec2 voxelToTexel(ivec3 voxelCoord, float gridSize, float slicesPerRow) {
+  int vx = voxelCoord.x;
+  int vy = voxelCoord.y;
+  int vz = voxelCoord.z;
+  
+  // Which Z-slice?
+  int sliceIndex = vz;
+  int sliceRow = sliceIndex / int(slicesPerRow);
+  int sliceCol = sliceIndex - sliceRow * int(slicesPerRow);  // mod without float conversion
+  
+  // Texel position
+  int texelX = sliceCol * int(gridSize) + vx;
+  int texelY = sliceRow * int(gridSize) + vy;
+  
+  return ivec2(texelX, texelY);
+}
 
 void main() {
   ivec2 coord = ivec2(gl_FragCoord.xy);
   
-  // Read 2x2 block from previous level
-  ivec2 childBase = coord * 2;
-  vec4 child00 = texelFetch(u_previousLevel, childBase + ivec2(0,0), 0);
-  vec4 child01 = texelFetch(u_previousLevel, childBase + ivec2(0,1), 0);
-  vec4 child10 = texelFetch(u_previousLevel, childBase + ivec2(1,0), 0);
-  vec4 child11 = texelFetch(u_previousLevel, childBase + ivec2(1,1), 0);
+  // Reverse the voxelToTexel mapping to get parent voxel coordinate
+  int gridSizeInt = int(u_gridSize);
+  int slicesPerRowInt = int(u_slicesPerRow);
   
-  // Aggregate: sum all components
-  vec4 aggregate = child00 + child01 + child10 + child11;
+  int sliceCol = coord.x / gridSizeInt;
+  int sliceRow = coord.y / gridSizeInt;
+  int sliceIndex = sliceRow * slicesPerRowInt + sliceCol;
+  
+  int vx = coord.x - sliceCol * gridSizeInt;
+  int vy = coord.y - sliceRow * gridSizeInt;
+  int vz = sliceIndex;
+  
+  ivec3 parentVoxel = ivec3(vx, vy, vz);
+  
+  // Parent grid is at half resolution in previous level
+  float childGridSize = u_gridSize * 2.0;
+  float childSlicesPerRow = u_slicesPerRow * 2.0;
+  
+  // 8 children: 2x2x2 cube
+  ivec3 childBase = parentVoxel * 2;
+  vec4 child000 = texelFetch(u_previousLevel, voxelToTexel(childBase + ivec3(0,0,0), childGridSize, childSlicesPerRow), 0);
+  vec4 child001 = texelFetch(u_previousLevel, voxelToTexel(childBase + ivec3(0,0,1), childGridSize, childSlicesPerRow), 0);
+  vec4 child010 = texelFetch(u_previousLevel, voxelToTexel(childBase + ivec3(0,1,0), childGridSize, childSlicesPerRow), 0);
+  vec4 child011 = texelFetch(u_previousLevel, voxelToTexel(childBase + ivec3(0,1,1), childGridSize, childSlicesPerRow), 0);
+  vec4 child100 = texelFetch(u_previousLevel, voxelToTexel(childBase + ivec3(1,0,0), childGridSize, childSlicesPerRow), 0);
+  vec4 child101 = texelFetch(u_previousLevel, voxelToTexel(childBase + ivec3(1,0,1), childGridSize, childSlicesPerRow), 0);
+  vec4 child110 = texelFetch(u_previousLevel, voxelToTexel(childBase + ivec3(1,1,0), childGridSize, childSlicesPerRow), 0);
+  vec4 child111 = texelFetch(u_previousLevel, voxelToTexel(childBase + ivec3(1,1,1), childGridSize, childSlicesPerRow), 0);
+  
+  // Aggregate: sum all 8 children
+  vec4 aggregate = child000 + child001 + child010 + child011 + child100 + child101 + child110 + child111;
   
   fragColor = aggregate;
 }`;
-  var renderVertexShader = `#version 300 es
+
+  // src/plan-m/shaders/aggregation.vert.js
+  var aggregation_vert_default = `#version 300 es
 precision highp float;
 
-in float a_index;
+// Octree 3D aggregation with Z-slice stacking
+
+uniform sampler2D u_positions;   // RGBA: xyz + mass
+uniform vec2 u_texSize;          // positions texture size
+uniform vec3 u_worldMin;         // XYZ world min
+uniform vec3 u_worldMax;         // XYZ world max
+uniform float u_gridSize;        // octree grid size (e.g., 64)
+uniform float u_slicesPerRow;    // slices per row (e.g., 8 for 8x8 grid)
+
+out vec4 v_particleData;
+
+ivec2 indexToCoord(int index, vec2 texSize) {
+  int w = int(texSize.x);
+  int ix = index % w;
+  int iy = index / w;
+  return ivec2(ix, iy);
+}
+
+// Convert 3D voxel coordinate to 2D texture coordinate
+vec2 voxelToTexel(vec3 voxelCoord, float gridSize, float slicesPerRow) {
+  float vx = voxelCoord.x;
+  float vy = voxelCoord.y;
+  float vz = voxelCoord.z;
+  
+  // Which Z-slice?
+  float sliceIndex = vz;
+  float sliceRow = floor(sliceIndex / slicesPerRow);
+  float sliceCol = mod(sliceIndex, slicesPerRow);
+  
+  // Texel position
+  float texelX = sliceCol * gridSize + vx;
+  float texelY = sliceRow * gridSize + vy;
+  
+  return vec2(texelX, texelY);
+}
+
+void main() {
+  int index = gl_VertexID;
+  ivec2 coord = indexToCoord(index, u_texSize);
+  vec4 pos = texelFetch(u_positions, coord, 0);
+  float mass = pos.a;
+
+  if (mass <= 0.0) {
+    // Cull zero-mass entries
+    gl_Position = vec4(2.0, 2.0, 0.0, 1.0);
+    gl_PointSize = 0.0;
+    v_particleData = vec4(0.0);
+    return;
+  }
+
+  // Map particle XYZ to 3D voxel grid with isotropic boundaries
+  vec3 worldExtent = u_worldMax - u_worldMin;
+  vec3 norm = (pos.xyz - u_worldMin) / worldExtent;
+  // Clamp to valid range, ensuring symmetric treatment of all axes
+  norm = clamp(norm, vec3(0.0), vec3(0.9999));
+  vec3 voxelCoord = floor(norm * u_gridSize);
+  // Ensure voxel is within bounds (defensive)
+  voxelCoord = clamp(voxelCoord, vec3(0.0), vec3(u_gridSize - 1.0));
+  
+  // Convert 3D voxel to 2D texture coordinate
+  float textureSize = u_gridSize * u_slicesPerRow;
+  vec2 texelPos = voxelToTexel(voxelCoord, u_gridSize, u_slicesPerRow);
+  vec2 texelCenter = (texelPos + 0.5) / textureSize;
+  vec2 clip = texelCenter * 2.0 - 1.0;
+
+  gl_Position = vec4(clip, 0.0, 1.0);
+  gl_PointSize = 1.0;
+
+  // Weighted sum: store 3D weighted position and mass
+  v_particleData = vec4(pos.xyz * mass, mass);
+}`;
+
+  // src/plan-m/shaders/aggregation.frag.js
+  var aggregation_frag_default = `#version 300 es
+precision highp float;
+
+// Accumulate weighted 3D positions and mass
+// Input: vec4(pos.xyz * mass, mass) from vertex shader
+in vec4 v_particleData;
+out vec4 fragColor;
+
+void main() {
+  fragColor = v_particleData;
+}`;
+
+  // src/plan-m/shaders/traversal.frag.js
+  var traversal_frag_default = `#version 300 es
+precision highp float;
+
+// 3D isotropic octree traversal with Barnes-Hut
+
+uniform sampler2D u_particlePositions;
+uniform sampler2D u_quadtreeLevel0;
+uniform sampler2D u_quadtreeLevel1;
+uniform sampler2D u_quadtreeLevel2;
+uniform sampler2D u_quadtreeLevel3;
+uniform sampler2D u_quadtreeLevel4;
+uniform sampler2D u_quadtreeLevel5;
+uniform sampler2D u_quadtreeLevel6;
+uniform sampler2D u_quadtreeLevel7;
+uniform float u_theta;
+uniform int u_numLevels;
+uniform float u_cellSizes[8];
+uniform float u_gridSizes[8];         // voxel grid sizes per level
+uniform float u_slicesPerRow[8];      // slices per row per level
+uniform vec2 u_texSize;
+uniform int u_particleCount;
+uniform vec3 u_worldMin;
+uniform vec3 u_worldMax;
+uniform float u_softening;
+uniform float u_G;
+
+out vec4 fragColor;
+
+vec4 sampleLevel(int level, ivec2 coord) {
+  if (level == 0) { return texelFetch(u_quadtreeLevel0, coord, 0); }
+  else if (level == 1) { return texelFetch(u_quadtreeLevel1, coord, 0); }
+  else if (level == 2) { return texelFetch(u_quadtreeLevel2, coord, 0); }
+  else if (level == 3) { return texelFetch(u_quadtreeLevel3, coord, 0); }
+  else if (level == 4) { return texelFetch(u_quadtreeLevel4, coord, 0); }
+  else if (level == 5) { return texelFetch(u_quadtreeLevel5, coord, 0); }
+  else if (level == 6) { return texelFetch(u_quadtreeLevel6, coord, 0); }
+  else if (level == 7) { return texelFetch(u_quadtreeLevel7, coord, 0); }
+  else { return vec4(0.0); }
+}
+
+// Convert 3D voxel coordinate to 2D texture coordinate
+ivec2 voxelToTexel(ivec3 voxelCoord, float gridSize, float slicesPerRow) {
+  int vx = voxelCoord.x;
+  int vy = voxelCoord.y;
+  int vz = voxelCoord.z;
+  
+  // Which Z-slice?
+  int sliceIndex = vz;
+  int sliceRow = sliceIndex / int(slicesPerRow);
+  int sliceCol = sliceIndex - sliceRow * int(slicesPerRow);
+  
+  // Texel position
+  int texelX = sliceCol * int(gridSize) + vx;
+  int texelY = sliceRow * int(gridSize) + vy;
+  
+  return ivec2(texelX, texelY);
+}
+
+void main() {
+  ivec2 coord = ivec2(gl_FragCoord.xy);
+  int myIndex = coord.y * int(u_texSize.x) + coord.x;
+  if (myIndex >= u_particleCount) {
+    fragColor = vec4(0.0);
+    return;
+  }
+
+  vec2 myUV = (vec2(coord) + 0.5) / u_texSize;
+  vec3 myPos = texture(u_particlePositions, myUV).xyz;
+  vec3 totalForce = vec3(0.0);
+
+  vec3 worldExtent = u_worldMax - u_worldMin;
+  float eps = max(u_softening, 1e-6);
+
+  // Traverse octree levels from coarsest to finest
+  for (int level = min(u_numLevels - 1, 7); level >= 0; level--) {
+    float gridSize = u_gridSizes[level];
+    float slicesPerRow = u_slicesPerRow[level];
+    float cellSize = u_cellSizes[level];
+
+    // Special case: root level (1\xD71\xD71 voxel)
+    if (gridSize == 1.0) {
+      vec4 root = sampleLevel(level, ivec2(0, 0));
+      float massSum = root.a;
+      if (massSum > 0.0) {
+        vec3 com = root.rgb / max(massSum, 1e-6);
+        vec3 delta = com - myPos;
+        float d = length(delta);
+        float s = cellSize;
+        if ((s / max(d, eps)) < u_theta) {
+          // Approximate: use COM with proper gravitational softening
+          float dSq = d * d;
+          float softSq = eps * eps;
+          float denom = dSq + softSq;
+          float inv = 1.0 / (denom * sqrt(denom)); // 1 / (d\xB2 + eps\xB2)^1.5
+          totalForce += delta * m * inv;
+        }
+      }
+      continue;
+    }
+
+    // Find my voxel coordinate at this level
+    vec3 norm = (myPos - u_worldMin) / worldExtent;
+    norm = clamp(norm, vec3(0.0), vec3(1.0 - (1.0 / gridSize)));
+    ivec3 myVoxel = ivec3(floor(norm * gridSize));
+
+    // Sample full 3D neighborhood (27 voxels - 1 center = 26 voxels)
+    // Use all neighbors to avoid anisotropic sampling bias
+    const int R = 1;
+    for (int dz = -R; dz <= R; dz++) {
+      for (int dy = -R; dy <= R; dy++) {
+        for (int dx = -R; dx <= R; dx++) {
+          if (dx == 0 && dy == 0 && dz == 0) { continue; } // Skip center
+          
+          ivec3 neighborVoxel = myVoxel + ivec3(dx, dy, dz);
+          
+          // Bounds check
+          if (neighborVoxel.x < 0 || neighborVoxel.y < 0 || neighborVoxel.z < 0 ||
+              neighborVoxel.x >= int(gridSize) || neighborVoxel.y >= int(gridSize) || neighborVoxel.z >= int(gridSize)) {
+            continue;
+          }
+          
+          ivec2 texCoord = voxelToTexel(neighborVoxel, gridSize, slicesPerRow);
+          vec4 nodeData = sampleLevel(level, texCoord);
+          float m = nodeData.a;
+          if (m <= 0.0) { continue; }
+          
+          // Sub-voxel COM for smoother force field
+          vec3 com = nodeData.rgb / max(m, 1e-6);
+          vec3 delta = com - myPos;
+          float d = length(delta);
+          float s = cellSize;
+          
+          // Distance-based theta criterion (isotropic)
+          if ((s / max(d, eps)) < u_theta) {
+            // Approximate: use COM with proper gravitational softening
+            float dSq = d * d;
+            float softSq = eps * eps;
+            float denom = dSq + softSq;
+            float inv = 1.0 / (denom * sqrt(denom)); // 1 / (d\xB2 + eps\xB2)^1.5
+            totalForce += delta * m * inv;
+          }
+        }
+      }
+    }
+  }
+
+  // Near-field: sample L0 local neighborhood (3\xD73\xD73 - 1 = 26 voxels)
+  // with extended radius for smoother transitions
+  {
+    float gridSize = u_gridSizes[0];
+    float slicesPerRow = u_slicesPerRow[0];
+    vec3 norm = (myPos - u_worldMin) / worldExtent;
+    norm = clamp(norm, vec3(0.0), vec3(1.0 - (1.0 / gridSize)));
+    ivec3 myL0Voxel = ivec3(floor(norm * gridSize));
+    
+    // Sample 5\xD75\xD75 neighborhood at L0 for smoother near-field
+    const int R0 = 2;
+    for (int dz = -R0; dz <= R0; dz++) {
+      for (int dy = -R0; dy <= R0; dy++) {
+        for (int dx = -R0; dx <= R0; dx++) {
+          if (dx == 0 && dy == 0 && dz == 0) { continue; }
+          
+          // Skip far corners to maintain isotropy
+          int manhattan = abs(dx) + abs(dy) + abs(dz);
+          if (manhattan > 4) { continue; }
+          
+          ivec3 neighborVoxel = myL0Voxel + ivec3(dx, dy, dz);
+          if (neighborVoxel.x < 0 || neighborVoxel.y < 0 || neighborVoxel.z < 0 ||
+              neighborVoxel.x >= int(gridSize) || neighborVoxel.y >= int(gridSize) || neighborVoxel.z >= int(gridSize)) {
+            continue;
+          }
+          
+          ivec2 texCoord = voxelToTexel(neighborVoxel, gridSize, slicesPerRow);
+          vec4 nodeData = sampleLevel(0, texCoord);
+          float m = nodeData.a;
+          if (m <= 0.0) { continue; }
+          
+          // Sub-voxel COM for high-resolution force field
+          vec3 com = nodeData.rgb / max(m, 1e-6);
+          vec3 delta = com - myPos;
+          float d = length(delta);
+          float dSq = d * d;
+          float softSq = eps * eps;
+          float denom = dSq + softSq;
+          float inv = 1.0 / (denom * sqrt(denom)); // 1 / (d\xB2 + eps\xB2)^1.5
+          totalForce += delta * m * inv;
+        }
+      }
+    }
+  }
+
+  fragColor = vec4(totalForce * u_G, 0.0);
+}`;
+
+  // src/plan-m/shaders/render.vert.js
+  var render_vert_default = `#version 300 es
+precision highp float;
 
 uniform sampler2D u_positions;
 uniform vec2 u_texSize;
@@ -27606,32 +27934,37 @@ uniform float u_pointSize;
 
 out vec3 v_color;
 
-vec2 indexToUV(float index) {
-  float x = mod(index, u_texSize.x);
-  float y = floor(index / u_texSize.x);
-  return (vec2(x, y) + 0.5) / u_texSize;
+ivec2 indexToCoord(int index, vec2 texSize) {
+  int w = int(texSize.x);
+  int ix = index % w;
+  int iy = index / w;
+  return ivec2(ix, iy);
 }
 
 void main() {
-  vec2 uv = indexToUV(a_index);
-  vec4 posData = texture(u_positions, uv);
+  int index = gl_VertexID;
+  ivec2 coord = indexToCoord(index, u_texSize);
+  vec4 posData = texelFetch(u_positions, coord, 0);
   vec3 worldPos = posData.xyz;
   
-  // Skip particles that are at origin (unused texels)
-  if (length(worldPos) < 0.001) {
-    gl_Position = vec4(0, 0, -1000, 1); // Move offscreen
+  // Cull unused texels (mass == 0)
+  if (posData.w <= 0.0) {
+    gl_Position = vec4(0.0, 0.0, 2.0, 1.0); // Behind camera
     gl_PointSize = 0.0;
-    v_color = vec3(0);
+    v_color = vec3(0.0);
     return;
   }
   
+  // Transform world position using camera's projection-view matrix
   gl_Position = u_projectionView * vec4(worldPos, 1.0);
   gl_PointSize = u_pointSize;
   
   // Color based on position for visualization
   v_color = normalize(worldPos) * 0.5 + 0.5;
 }`;
-  var renderFragmentShader = `#version 300 es
+
+  // src/plan-m/shaders/render.frag.js
+  var render_frag_default = `#version 300 es
 precision mediump float;
 
 in vec3 v_color;
@@ -27644,28 +27977,480 @@ void main() {
   vec3 color = v_color * (0.8 + 0.2 * (1.0 - dist));
   fragColor = vec4(color, alpha);
 }`;
+
+  // src/plan-m/shaders/vel_integrate.frag.js
+  var vel_integrate_frag_default = `#version 300 es
+precision highp float;
+
+uniform sampler2D u_velocity;
+uniform sampler2D u_force;
+uniform vec2 u_texSize;
+uniform int u_particleCount;
+uniform float u_dt;
+uniform float u_damping;
+uniform float u_maxSpeed;
+uniform float u_maxAccel;
+
+out vec4 fragColor;
+
+void main() {
+  ivec2 coord = ivec2(gl_FragCoord.xy);
+  int idx = coord.y * int(u_texSize.x) + coord.x;
+  vec4 vel = texelFetch(u_velocity, coord, 0);
+  if (idx >= u_particleCount) {
+    fragColor = vel;
+    return;
+  }
+  vec3 force = texelFetch(u_force, coord, 0).xyz;
+  float fmag = length(force);
+  if (fmag > u_maxAccel) {
+    force = force * (u_maxAccel / max(fmag, 1e-6));
+  }
+  vec3 newVel = vel.xyz + force * u_dt;
+  newVel *= (1.0 - u_damping);
+  float vmag = length(newVel);
+  if (vmag > u_maxSpeed) {
+    newVel = newVel * (u_maxSpeed / vmag);
+  }
+  fragColor = vec4(newVel, 0.0);
+}`;
+
+  // src/plan-m/shaders/pos_integrate.frag.js
+  var pos_integrate_frag_default = `#version 300 es
+precision highp float;
+
+uniform sampler2D u_positions;
+uniform sampler2D u_velocity;
+uniform vec2 u_texSize;
+uniform int u_particleCount;
+uniform float u_dt;
+
+out vec4 fragColor;
+
+void main() {
+  ivec2 coord = ivec2(gl_FragCoord.xy);
+  int idx = coord.y * int(u_texSize.x) + coord.x;
+  vec4 pos = texelFetch(u_positions, coord, 0);
+  if (idx >= u_particleCount) {
+    fragColor = pos;
+    return;
+  }
+  vec3 vel = texelFetch(u_velocity, coord, 0).xyz;
+  vec3 newPos = pos.xyz + vel * u_dt;
+  fragColor = vec4(newPos, pos.w);
+}`;
+
+  // src/plan-m/utils/debug.js
+  function unbindAllTextures(gl, maxUnitsHint = 16) {
+    if (!gl) return;
+    const maxUnits = Math.min(maxUnitsHint, gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS) || maxUnitsHint);
+    for (let i = 0; i < maxUnits; i++) {
+      gl.activeTexture(gl.TEXTURE0 + i);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+    }
+    gl.activeTexture(gl.TEXTURE0);
+  }
+  function checkGl(gl, tag = "") {
+    if (!gl) return 0;
+    const err = gl.getError();
+    if (err !== gl.NO_ERROR) {
+      console.error(`Plan M GL error after ${tag}: 0x${err.toString(16)}`);
+    }
+    return err;
+  }
+  function checkFBO(gl, tag = "") {
+    if (!gl) return;
+    const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    if (status !== gl.FRAMEBUFFER_COMPLETE) {
+      console.error(`Plan M FBO incomplete at ${tag}: 0x${status.toString(16)}`);
+    }
+  }
+
+  // src/plan-m/pipeline/aggregator.js
+  function aggregateParticlesIntoL0(ctx) {
+    const gl = ctx.gl;
+    gl.useProgram(ctx.programs.aggregation);
+    ctx.unbindAllTextures();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, ctx.levelFramebuffers[0]);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+    const L0 = ctx.levelTextures[0].size;
+    gl.viewport(0, 0, L0, L0);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.scissor(0, 0, L0, L0);
+    ctx.checkFBO("aggregate L0 (after bind)");
+    ctx.checkGl("aggregate L0 (after bind)");
+    gl.disable(gl.DEPTH_TEST);
+    if (!ctx._disableFloatBlend) {
+      gl.enable(gl.BLEND);
+      gl.blendEquation(gl.FUNC_ADD);
+      gl.blendFunc(gl.ONE, gl.ONE);
+    } else {
+      gl.disable(gl.BLEND);
+    }
+    ctx.checkGl("aggregate L0 (after blend setup)");
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, ctx.positionTextures.getCurrentTexture());
+    const u_positions = gl.getUniformLocation(ctx.programs.aggregation, "u_positions");
+    gl.uniform1i(u_positions, 0);
+    ctx.checkGl("aggregate L0 (after bind positions)");
+    const u_texSize = gl.getUniformLocation(ctx.programs.aggregation, "u_texSize");
+    const u_worldMin = gl.getUniformLocation(ctx.programs.aggregation, "u_worldMin");
+    const u_worldMax = gl.getUniformLocation(ctx.programs.aggregation, "u_worldMax");
+    const u_gridSize = gl.getUniformLocation(ctx.programs.aggregation, "u_gridSize");
+    const u_slicesPerRow = gl.getUniformLocation(ctx.programs.aggregation, "u_slicesPerRow");
+    gl.uniform2f(u_texSize, ctx.textureWidth, ctx.textureHeight);
+    gl.uniform3f(
+      u_worldMin,
+      ctx.options.worldBounds.min[0],
+      ctx.options.worldBounds.min[1],
+      ctx.options.worldBounds.min[2]
+    );
+    gl.uniform3f(
+      u_worldMax,
+      ctx.options.worldBounds.max[0],
+      ctx.options.worldBounds.max[1],
+      ctx.options.worldBounds.max[2]
+    );
+    gl.uniform1f(u_gridSize, ctx.octreeGridSize);
+    gl.uniform1f(u_slicesPerRow, ctx.octreeSlicesPerRow);
+    ctx.checkGl("aggregate L0 (after set uniforms)");
+    const attachedTex = gl.getFramebufferAttachmentParameter(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME);
+    const posTex = ctx.positionTextures.getCurrentTexture();
+    if (attachedTex === posTex) {
+      console.error("Plan M: FEEDBACK DETECTED - L0 FBO is the same texture as positions being sampled.");
+    }
+    console.log("Plan M draw: aggregateParticlesIntoL0");
+    ctx.checkFBO("aggregate L0");
+    ctx.checkGl("aggregate L0 (before draw)");
+    gl.bindVertexArray(ctx.particleVAO);
+    gl.drawArrays(gl.POINTS, 0, ctx.options.particleCount);
+    gl.bindVertexArray(null);
+    ctx.checkGl("aggregate L0 (after draw)");
+    gl.disable(gl.BLEND);
+    ctx.unbindAllTextures();
+    const err = ctx.checkGl("aggregateParticlesIntoL0");
+    if (err !== gl.NO_ERROR) {
+      if (!ctx._disableFloatBlend) {
+        console.warn("Plan M: Disabling float blending for L0 accumulation due to GL error. Falling back to non-blended writes (reduced accuracy).");
+        ctx._disableFloatBlend = true;
+      } else {
+        console.warn("Plan M: Disabling quadtree due to persistent GL errors in aggregation. Forces will be cleared each frame.");
+        ctx._quadtreeDisabled = true;
+      }
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  // src/plan-m/pipeline/pyramid.js
+  function runReductionPass(ctx, sourceLevel, targetLevel) {
+    const gl = ctx.gl;
+    gl.useProgram(ctx.programs.reduction);
+    ctx.unbindAllTextures();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, ctx.levelFramebuffers[targetLevel]);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+    gl.viewport(0, 0, ctx.levelTextures[targetLevel].size, ctx.levelTextures[targetLevel].size);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.scissor(0, 0, ctx.levelTextures[targetLevel].size, ctx.levelTextures[targetLevel].size);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, ctx.levelTextures[sourceLevel].texture);
+    const u_previousLevel = gl.getUniformLocation(ctx.programs.reduction, "u_previousLevel");
+    const u_gridSize = gl.getUniformLocation(ctx.programs.reduction, "u_gridSize");
+    const u_slicesPerRow = gl.getUniformLocation(ctx.programs.reduction, "u_slicesPerRow");
+    gl.uniform1i(u_previousLevel, 0);
+    gl.uniform1f(u_gridSize, ctx.levelTextures[targetLevel].gridSize);
+    gl.uniform1f(u_slicesPerRow, ctx.levelTextures[targetLevel].slicesPerRow);
+    console.log(`Plan M draw: reduction ${sourceLevel}->${targetLevel}`);
+    ctx.checkFBO(`reduction ${sourceLevel}->${targetLevel}`);
+    gl.bindVertexArray(ctx.quadVAO);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.bindVertexArray(null);
+    ctx.unbindAllTextures();
+    ctx.checkGl(`runReductionPass ${sourceLevel}->${targetLevel}`);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  // src/plan-m/pipeline/traversal.js
+  function calculateForces(ctx) {
+    const gl = ctx.gl;
+    gl.useProgram(ctx.programs.traversal);
+    ctx.unbindAllTextures();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, ctx.forceTexture.framebuffer);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+    gl.viewport(0, 0, ctx.textureWidth, ctx.textureHeight);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.scissor(0, 0, ctx.textureWidth, ctx.textureHeight);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, ctx.positionTextures.getCurrentTexture());
+    gl.uniform1i(gl.getUniformLocation(ctx.programs.traversal, "u_particlePositions"), 0);
+    for (let i = 0; i < Math.min(8, ctx.numLevels); i++) {
+      gl.activeTexture(gl.TEXTURE1 + i);
+      gl.bindTexture(gl.TEXTURE_2D, ctx.levelTextures[i].texture);
+      const loc = gl.getUniformLocation(ctx.programs.traversal, `u_quadtreeLevel${i}`);
+      if (loc) gl.uniform1i(loc, 1 + i);
+    }
+    gl.uniform1f(gl.getUniformLocation(ctx.programs.traversal, "u_theta"), ctx.options.theta);
+    gl.uniform1i(gl.getUniformLocation(ctx.programs.traversal, "u_numLevels"), ctx.numLevels);
+    gl.uniform2f(gl.getUniformLocation(ctx.programs.traversal, "u_texSize"), ctx.textureWidth, ctx.textureHeight);
+    gl.uniform1i(gl.getUniformLocation(ctx.programs.traversal, "u_particleCount"), ctx.options.particleCount);
+    gl.uniform3f(
+      gl.getUniformLocation(ctx.programs.traversal, "u_worldMin"),
+      ctx.options.worldBounds.min[0],
+      ctx.options.worldBounds.min[1],
+      ctx.options.worldBounds.min[2]
+    );
+    gl.uniform3f(
+      gl.getUniformLocation(ctx.programs.traversal, "u_worldMax"),
+      ctx.options.worldBounds.max[0],
+      ctx.options.worldBounds.max[1],
+      ctx.options.worldBounds.max[2]
+    );
+    gl.uniform1f(gl.getUniformLocation(ctx.programs.traversal, "u_softening"), ctx.options.softening);
+    gl.uniform1f(gl.getUniformLocation(ctx.programs.traversal, "u_G"), ctx.options.gravityStrength);
+    const cellSizes = new Float32Array(8);
+    const gridSizes = new Float32Array(8);
+    const slicesPerRow = new Float32Array(8);
+    const worldExtent = [
+      ctx.options.worldBounds.max[0] - ctx.options.worldBounds.min[0],
+      ctx.options.worldBounds.max[1] - ctx.options.worldBounds.min[1],
+      ctx.options.worldBounds.max[2] - ctx.options.worldBounds.min[2]
+    ];
+    const worldSize = Math.max(...worldExtent);
+    let currentGridSize = ctx.octreeGridSize;
+    let currentSlicesPerRow = ctx.octreeSlicesPerRow;
+    let cellSize = worldSize / currentGridSize;
+    for (let i = 0; i < 8; i++) {
+      cellSizes[i] = cellSize;
+      gridSizes[i] = currentGridSize;
+      slicesPerRow[i] = currentSlicesPerRow;
+      currentGridSize = Math.max(1, Math.floor(currentGridSize / 2));
+      currentSlicesPerRow = Math.max(1, Math.floor(currentSlicesPerRow / 2));
+      cellSize *= 2;
+    }
+    gl.uniform1fv(gl.getUniformLocation(ctx.programs.traversal, "u_cellSizes"), cellSizes);
+    gl.uniform1fv(gl.getUniformLocation(ctx.programs.traversal, "u_gridSizes"), gridSizes);
+    gl.uniform1fv(gl.getUniformLocation(ctx.programs.traversal, "u_slicesPerRow"), slicesPerRow);
+    console.log("Plan M draw: calculateForces");
+    ctx.checkFBO("calculateForces");
+    gl.bindVertexArray(ctx.quadVAO);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.bindVertexArray(null);
+    if (ctx.frameCount < 3) {
+      const px = new Float32Array(4);
+      gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, px);
+      console.log(`Frame ${ctx.frameCount}: Force on P0: [${px[0].toFixed(5)}, ${px[1].toFixed(5)}, ${px[2].toFixed(5)}]`);
+    }
+    ctx.unbindAllTextures();
+    ctx.checkGl("calculateForces");
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  // src/plan-m/pipeline/integrator.js
+  function integratePhysics(ctx) {
+    const gl = ctx.gl;
+    gl.useProgram(ctx.programs.velIntegrate);
+    ctx.unbindAllTextures();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, ctx.velocityTextures.getTargetFramebuffer());
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+    gl.viewport(0, 0, ctx.textureWidth, ctx.textureHeight);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.scissor(0, 0, ctx.textureWidth, ctx.textureHeight);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, ctx.velocityTextures.getCurrentTexture());
+    gl.uniform1i(gl.getUniformLocation(ctx.programs.velIntegrate, "u_velocity"), 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, ctx.forceTexture.texture);
+    gl.uniform1i(gl.getUniformLocation(ctx.programs.velIntegrate, "u_force"), 1);
+    gl.uniform2f(gl.getUniformLocation(ctx.programs.velIntegrate, "u_texSize"), ctx.textureWidth, ctx.textureHeight);
+    gl.uniform1i(gl.getUniformLocation(ctx.programs.velIntegrate, "u_particleCount"), ctx.options.particleCount);
+    gl.uniform1f(gl.getUniformLocation(ctx.programs.velIntegrate, "u_dt"), ctx.options.dt);
+    gl.uniform1f(gl.getUniformLocation(ctx.programs.velIntegrate, "u_damping"), ctx.options.damping);
+    gl.uniform1f(gl.getUniformLocation(ctx.programs.velIntegrate, "u_maxSpeed"), ctx.options.maxSpeed);
+    gl.uniform1f(gl.getUniformLocation(ctx.programs.velIntegrate, "u_maxAccel"), ctx.options.maxAccel);
+    gl.bindVertexArray(ctx.quadVAO);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.bindVertexArray(null);
+    ctx.unbindAllTextures();
+    ctx.checkGl("velIntegrate");
+    ctx.velocityTextures.swap();
+    gl.useProgram(ctx.programs.posIntegrate);
+    ctx.unbindAllTextures();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, ctx.positionTextures.getTargetFramebuffer());
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+    gl.viewport(0, 0, ctx.textureWidth, ctx.textureHeight);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.scissor(0, 0, ctx.textureWidth, ctx.textureHeight);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, ctx.positionTextures.getCurrentTexture());
+    gl.uniform1i(gl.getUniformLocation(ctx.programs.posIntegrate, "u_positions"), 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, ctx.velocityTextures.getCurrentTexture());
+    gl.uniform1i(gl.getUniformLocation(ctx.programs.posIntegrate, "u_velocity"), 1);
+    gl.uniform2f(gl.getUniformLocation(ctx.programs.posIntegrate, "u_texSize"), ctx.textureWidth, ctx.textureHeight);
+    gl.uniform1i(gl.getUniformLocation(ctx.programs.posIntegrate, "u_particleCount"), ctx.options.particleCount);
+    gl.uniform1f(gl.getUniformLocation(ctx.programs.posIntegrate, "u_dt"), ctx.options.dt);
+    gl.bindVertexArray(ctx.quadVAO);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.bindVertexArray(null);
+    ctx.unbindAllTextures();
+    ctx.checkGl("posIntegrate");
+    ctx.positionTextures.swap();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  // src/plan-m/pipeline/bounds.js
+  function updateWorldBoundsFromTexture(ctx, sampleCount = 256) {
+    const gl = ctx.gl;
+    if (!gl || !ctx.positionTextures) return;
+    const fbos = ctx.positionTextures.framebuffers;
+    const idx = ctx.positionTextures.currentIndex;
+    const fbo = fbos[idx];
+    if (!fbo) return;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.readBuffer(gl.COLOR_ATTACHMENT0);
+    let minX = Infinity, minY = Infinity;
+    let maxX = -Infinity, maxY = -Infinity;
+    const px = new Float32Array(4);
+    const w = ctx.textureWidth;
+    const h = ctx.textureHeight;
+    const step = Math.max(1, Math.floor(Math.sqrt(w * h / sampleCount)));
+    let count = 0;
+    for (let y = 0; y < h && count < sampleCount; y += step) {
+      for (let x = 0; x < w && count < sampleCount; x += step) {
+        gl.readPixels(x, y, 1, 1, gl.RGBA, gl.FLOAT, px);
+        if (px[3] > 0) {
+          const X = px[0], Y = px[1];
+          if (X < minX) minX = X;
+          if (Y < minY) minY = Y;
+          if (X > maxX) maxX = X;
+          if (Y > maxY) maxY = Y;
+          count++;
+        }
+      }
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    if (count > 0 && isFinite(minX) && isFinite(minY) && isFinite(maxX) && isFinite(maxY)) {
+      const padX = Math.max(0.5, 0.1 * Math.max(1e-6, maxX - minX));
+      const padY = Math.max(0.5, 0.1 * Math.max(1e-6, maxY - minY));
+      ctx.options.worldBounds = {
+        min: [minX - padX, minY - padY, ctx.options.worldBounds.min[2]],
+        max: [maxX + padX, maxY + padY, ctx.options.worldBounds.max[2]]
+      };
+    }
+  }
+
+  // src/plan-m/pipeline/renderer.js
+  function renderParticles(ctx) {
+    if (!ctx.renderer || !ctx.scene) return;
+    const camera2 = ctx.getCameraFromScene();
+    if (!camera2) {
+      console.warn("Plan M: No camera found for rendering");
+      return;
+    }
+    const gl = ctx.gl;
+    const oldViewport = gl.getParameter(gl.VIEWPORT);
+    const oldProgram = gl.getParameter(gl.CURRENT_PROGRAM);
+    const oldFramebuffer = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+    try {
+      gl.useProgram(ctx.programs.render);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+      gl.disable(gl.SCISSOR_TEST);
+      gl.scissor(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, ctx.positionTextures.getCurrentTexture());
+      camera2.updateMatrixWorld();
+      camera2.updateProjectionMatrix();
+      const projectionMatrix = camera2.projectionMatrix;
+      const viewMatrix = camera2.matrixWorldInverse;
+      const projectionViewMatrix = new Float32Array(16);
+      const p = projectionMatrix.elements;
+      const v = viewMatrix.elements;
+      for (let col = 0; col < 4; col++) {
+        for (let row = 0; row < 4; row++) {
+          projectionViewMatrix[col * 4 + row] = p[0 * 4 + row] * v[col * 4 + 0] + p[1 * 4 + row] * v[col * 4 + 1] + p[2 * 4 + row] * v[col * 4 + 2] + p[3 * 4 + row] * v[col * 4 + 3];
+        }
+      }
+      const u_positions = gl.getUniformLocation(ctx.programs.render, "u_positions");
+      const u_texSize = gl.getUniformLocation(ctx.programs.render, "u_texSize");
+      const u_pointSize = gl.getUniformLocation(ctx.programs.render, "u_pointSize");
+      const u_projectionView = gl.getUniformLocation(ctx.programs.render, "u_projectionView");
+      const u_worldMin = gl.getUniformLocation(ctx.programs.render, "u_worldMin");
+      const u_worldMax = gl.getUniformLocation(ctx.programs.render, "u_worldMax");
+      gl.uniform1i(u_positions, 0);
+      gl.uniform2f(u_texSize, ctx.textureWidth, ctx.textureHeight);
+      gl.uniform1f(u_pointSize, ctx.options.pointSize);
+      if (u_projectionView) gl.uniformMatrix4fv(u_projectionView, false, projectionViewMatrix);
+      if (u_worldMin) gl.uniform3f(
+        u_worldMin,
+        ctx.options.worldBounds.min[0],
+        ctx.options.worldBounds.min[1],
+        ctx.options.worldBounds.min[2]
+      );
+      if (u_worldMax) gl.uniform3f(
+        u_worldMax,
+        ctx.options.worldBounds.max[0],
+        ctx.options.worldBounds.max[1],
+        ctx.options.worldBounds.max[2]
+      );
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.disable(gl.DEPTH_TEST);
+      gl.bindVertexArray(ctx.particleVAO);
+      gl.drawArrays(gl.POINTS, 0, ctx.options.particleCount);
+      gl.bindVertexArray(null);
+      gl.disable(gl.BLEND);
+      gl.disable(gl.DEPTH_TEST);
+      if (ctx.frameCount < 3) {
+        console.log(`Plan M: Rendered ${ctx.options.particleCount} particles at frame ${ctx.frameCount}`);
+        console.log(`Plan M: Camera position:`, camera2.position);
+        console.log(`Plan M: Point size:`, ctx.options.pointSize);
+        console.log(`Plan M: World bounds:`, ctx.options.worldBounds);
+        console.log(`Plan M: Texture size: ${ctx.textureWidth}x${ctx.textureHeight}`);
+        console.log(`Plan M: Viewport: ${gl.drawingBufferWidth}x${gl.drawingBufferHeight}`);
+      }
+    } catch (error) {
+      console.error("Plan M render error:", error);
+    } finally {
+      gl.useProgram(oldProgram);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, oldFramebuffer);
+    }
+  }
+
+  // src/plan-m/index.js
   var PlanM = class {
     constructor(scene2, renderer2) {
       this.scene = scene2;
       this.renderer = renderer2;
       this.gl = renderer2 ? renderer2.getContext() : null;
       this.options = {
-        particleCount: 5e4,
-        // Start smaller for initial implementation
-        worldBounds: { min: [-10, -10, -10], max: [10, 10, 10] },
+        particleCount: 2e5,
+        worldBounds: {
+          min: [-4, -4, 0],
+          max: [4, 4, 2]
+        },
         theta: 0.5,
-        // Barnes-Hut parameter
         pointSize: 2,
-        dt: 0.016
+        dt: 10 / 60,
+        initialSpeed: 0.05,
+        gravityStrength: 3e-4,
+        softening: 0.2,
+        damping: 0,
+        maxSpeed: 2,
+        maxAccel: 1,
+        debugSkipQuadtree: false,
+        renderOrthoFallback: true
       };
       this._objects = [];
       this.isInitialized = false;
       this.frameCount = 0;
       this.time = 0;
       this.running = false;
+      this._cameraInfoLogged = false;
       this.levelTextures = [];
       this.levelFramebuffers = [];
       this.positionTextures = null;
+      this.velocityTextures = null;
+      this.forceTexture = null;
       this.programs = {};
       this.quadVAO = null;
       this.particleVAO = null;
@@ -27673,6 +28458,22 @@ void main() {
       this.textureHeight = 0;
       this.numLevels = 0;
       this.L0Size = 0;
+      this._disableFloatBlend = false;
+      this._quadtreeDisabled = false;
+      this._orthoCam = null;
+      this._lastBoundsUpdateFrame = -1;
+    }
+    // Debug helper: unbind all textures on commonly used units to avoid feedback loops
+    unbindAllTextures() {
+      unbindAllTextures(this.gl);
+    }
+    // Debug helper: log gl errors with a tag
+    checkGl(tag) {
+      return checkGl(this.gl, tag);
+    }
+    // Debug helper: check FBO completeness and tag
+    checkFBO(tag) {
+      checkFBO(this.gl, tag);
     }
     async init() {
       if (!this.gl) {
@@ -27686,6 +28487,7 @@ void main() {
         this.createTextures();
         this.createGeometry();
         this.initializeParticles();
+        updateWorldBoundsFromTexture(this, 512);
         this.isInitialized = true;
         console.log("Plan M initialized successfully");
       } catch (error) {
@@ -27702,29 +28504,40 @@ void main() {
         throw new Error("EXT_color_buffer_float extension not supported");
       }
       if (!floatBlend) {
-        console.warn("EXT_float_blend not available, may have blending limitations");
+        throw new Error("EXT_float_blend extension not supported: required for additive blending to float textures");
       }
+      const caps = {
+        maxVertexTextureUnits: gl.getParameter(gl.MAX_VERTEX_TEXTURE_IMAGE_UNITS),
+        maxTextureUnits: gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS),
+        maxDrawBuffers: gl.getParameter(gl.MAX_DRAW_BUFFERS)
+      };
+      console.log("WebGL caps:", caps);
       console.log("WebGL2 extensions check passed");
     }
     calculateTextureDimensions() {
-      this.L0Size = Math.max(64, Math.ceil(Math.sqrt(this.options.particleCount * 4)));
-      this.numLevels = Math.min(8, Math.ceil(Math.log2(this.L0Size)) + 1);
+      this.octreeGridSize = 64;
+      this.octreeSlicesPerRow = 8;
+      this.numLevels = 7;
+      this.L0Size = this.octreeGridSize * this.octreeSlicesPerRow;
+      const maxTex = this.gl.getParameter(this.gl.MAX_TEXTURE_SIZE);
+      if (this.L0Size > maxTex) {
+        throw new Error(`Octree L0 size ${this.L0Size} exceeds max texture size ${maxTex}`);
+      }
       this.textureWidth = Math.ceil(Math.sqrt(this.options.particleCount));
       this.textureHeight = Math.ceil(this.options.particleCount / this.textureWidth);
       this.actualTextureSize = this.textureWidth * this.textureHeight;
-      console.log(`Quadtree: L0=${this.L0Size}x${this.L0Size}, ${this.numLevels} levels`);
+      console.log(`Octree: L0=${this.octreeGridSize}\xB3 voxels (${this.L0Size}x${this.L0Size} texture), ${this.numLevels} levels`);
+      console.log(`Z-slice stacking: ${this.octreeSlicesPerRow}x${this.octreeSlicesPerRow} grid of ${this.octreeGridSize} slices`);
       console.log(`Position texture: ${this.textureWidth}x${this.textureHeight} for ${this.options.particleCount} particles (${this.actualTextureSize} total texels)`);
     }
     createShaderPrograms() {
       const gl = this.gl;
-      this.programs.reduction = this.createProgram(
-        vertexShaderSource,
-        reductionFragmentShader
-      );
-      this.programs.render = this.createProgram(
-        renderVertexShader,
-        renderFragmentShader
-      );
+      this.programs.aggregation = this.createProgram(aggregation_vert_default, aggregation_frag_default);
+      this.programs.reduction = this.createProgram(fullscreen_vert_default, reduction_frag_default);
+      this.programs.traversal = this.createProgram(fullscreen_vert_default, traversal_frag_default);
+      this.programs.velIntegrate = this.createProgram(fullscreen_vert_default, vel_integrate_frag_default);
+      this.programs.posIntegrate = this.createProgram(fullscreen_vert_default, pos_integrate_frag_default);
+      this.programs.render = this.createProgram(render_vert_default, render_frag_default);
       console.log("Shader programs created successfully");
     }
     createProgram(vertexSource, fragmentSource) {
@@ -27763,6 +28576,8 @@ ${source}`);
       this.levelTextures = [];
       this.levelFramebuffers = [];
       let currentSize = this.L0Size;
+      let currentGridSize = this.octreeGridSize;
+      let currentSlicesPerRow = this.octreeSlicesPerRow;
       for (let i = 0; i < this.numLevels; i++) {
         const texture = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -27774,12 +28589,22 @@ ${source}`);
         const framebuffer = gl.createFramebuffer();
         gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
         gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
-        this.levelTextures.push({ texture, size: currentSize });
+        gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+        this.levelTextures.push({
+          texture,
+          size: currentSize,
+          gridSize: currentGridSize,
+          slicesPerRow: currentSlicesPerRow
+        });
         this.levelFramebuffers.push(framebuffer);
-        currentSize = Math.max(1, Math.floor(currentSize / 2));
+        currentGridSize = Math.max(1, Math.floor(currentGridSize / 2));
+        currentSlicesPerRow = Math.max(1, Math.floor(currentSlicesPerRow / 2));
+        currentSize = currentGridSize * currentSlicesPerRow;
       }
       this.positionTextures = this.createPingPongTextures(this.textureWidth, this.textureHeight);
-      console.log(`Created ${this.numLevels} quadtree level textures and particle textures`);
+      this.velocityTextures = this.createPingPongTextures(this.textureWidth, this.textureHeight);
+      this.forceTexture = this.createRenderTexture(this.textureWidth, this.textureHeight);
+      console.log(`Created ${this.numLevels} octree level textures and particle textures`);
     }
     createPingPongTextures(width, height) {
       const gl = this.gl;
@@ -27796,6 +28621,7 @@ ${source}`);
         const framebuffer = gl.createFramebuffer();
         gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
         gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+        gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
         textures.push(texture);
         framebuffers.push(framebuffer);
       }
@@ -27816,6 +28642,21 @@ ${source}`);
           this.currentIndex = 1 - this.currentIndex;
         }
       };
+    }
+    createRenderTexture(width, height) {
+      const gl = this.gl;
+      const texture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, height, 0, gl.RGBA, gl.FLOAT, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      const framebuffer = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+      gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+      return { texture, framebuffer };
     }
     createGeometry() {
       const gl = this.gl;
@@ -27851,12 +28692,14 @@ ${source}`);
     }
     initializeParticles() {
       const positions = new Float32Array(this.actualTextureSize * 4);
+      const velocities = new Float32Array(this.actualTextureSize * 4);
       const bounds = this.options.worldBounds;
       const center = [
         (bounds.min[0] + bounds.max[0]) / 2,
         (bounds.min[1] + bounds.max[1]) / 2,
         (bounds.min[2] + bounds.max[2]) / 2
       ];
+      const speed = this.options.initialSpeed !== void 0 ? this.options.initialSpeed : 0.05;
       for (let i = 0; i < this.options.particleCount; i++) {
         const base = i * 4;
         const angle = Math.random() * Math.PI * 2;
@@ -27865,7 +28708,11 @@ ${source}`);
         positions[base + 0] = center[0] + Math.cos(angle) * radius;
         positions[base + 1] = center[1] + Math.sin(angle) * radius;
         positions[base + 2] = center[2] + height;
-        positions[base + 3] = 1;
+        positions[base + 3] = 0.5 + Math.random() * 1.5;
+        velocities[base + 0] = (Math.random() - 0.5) * 2 * speed;
+        velocities[base + 1] = (Math.random() - 0.5) * 2 * speed;
+        velocities[base + 2] = (Math.random() - 0.5) * 2 * speed;
+        velocities[base + 3] = 0;
       }
       for (let i = this.options.particleCount; i < this.actualTextureSize; i++) {
         const base = i * 4;
@@ -27873,10 +28720,36 @@ ${source}`);
         positions[base + 1] = 0;
         positions[base + 2] = 0;
         positions[base + 3] = 0;
+        velocities[base + 0] = 0;
+        velocities[base + 1] = 0;
+        velocities[base + 2] = 0;
+        velocities[base + 3] = 0;
       }
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (let i = 0; i < this.options.particleCount; i++) {
+        const base = i * 4;
+        const x = positions[base + 0];
+        const y = positions[base + 1];
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+      const padX = Math.max(0.5, 0.1 * Math.max(1e-6, maxX - minX));
+      const padY = Math.max(0.5, 0.1 * Math.max(1e-6, maxY - minY));
+      this.options.worldBounds = {
+        min: [minX - padX, minY - padY, this.options.worldBounds.min[2]],
+        max: [maxX + padX, maxY + padY, this.options.worldBounds.max[2]]
+      };
       this.uploadTextureData(this.positionTextures.textures[0], positions);
       this.uploadTextureData(this.positionTextures.textures[1], positions);
+      this.uploadTextureData(this.velocityTextures.textures[0], velocities);
+      this.uploadTextureData(this.velocityTextures.textures[1], velocities);
       console.log(`Particle data initialized: ${this.options.particleCount} particles in ${this.actualTextureSize} texels`);
+      console.log(`Initial particle 0: pos=[${positions[0].toFixed(2)}, ${positions[1].toFixed(2)}, ${positions[2].toFixed(2)}] mass=${positions[3]}`);
+      console.log(`Initial velocity 0: vel=[${velocities[0].toFixed(3)}, ${velocities[1].toFixed(3)}, ${velocities[2].toFixed(3)}]`);
+      console.log(`World bounds after init:`, this.options.worldBounds);
+      console.log(`Bounds range: X=[${minX.toFixed(2)}, ${maxX.toFixed(2)}] Y=[${minY.toFixed(2)}, ${maxY.toFixed(2)}]`);
     }
     uploadTextureData(texture, data) {
       const gl = this.gl;
@@ -27905,97 +28778,58 @@ ${source}`);
       if (!this.running) return;
       if (this.isInitialized) {
         this.step();
-        this.renderToThreeJS();
+        if (this.frameCount % 10 === 0) {
+          updateWorldBoundsFromTexture(this, 256);
+        }
+        if (this.frameCount % 60 === 0 && this.frameCount < 300) {
+          const gl = this.gl;
+          gl.bindFramebuffer(gl.FRAMEBUFFER, this.positionTextures.framebuffers[this.positionTextures.currentIndex]);
+          const px = new Float32Array(4);
+          gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, px);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          console.log(`Frame ${this.frameCount}: P0 pos=[${px[0].toFixed(2)}, ${px[1].toFixed(2)}, ${px[2].toFixed(2)}] mass=${px[3].toFixed(2)}`);
+        }
+        renderParticles(this);
       }
     }
     step() {
-      this.buildQuadtree();
+      if (this.options.debugSkipQuadtree || this._quadtreeDisabled) {
+        this.clearForceTexture();
+      } else {
+        this.buildQuadtree();
+        calculateForces(this);
+      }
+      integratePhysics(this);
       this.time += this.options.dt;
       this.frameCount++;
     }
     buildQuadtree() {
       const gl = this.gl;
+      this.unbindAllTextures();
       for (let i = 0; i < this.numLevels; i++) {
         gl.bindFramebuffer(gl.FRAMEBUFFER, this.levelFramebuffers[i]);
         gl.viewport(0, 0, this.levelTextures[i].size, this.levelTextures[i].size);
         gl.clearColor(0, 0, 0, 0);
         gl.clear(gl.COLOR_BUFFER_BIT);
       }
-      this.populateL0WithTestData();
-      for (let level = 0; level < this.numLevels - 1; level++) {
-        this.runReductionPass(level, level + 1);
-      }
-    }
-    populateL0WithTestData() {
-      const gl = this.gl;
-      gl.bindFramebuffer(gl.FRAMEBUFFER, this.levelFramebuffers[0]);
-      gl.viewport(0, 0, this.levelTextures[0].size, this.levelTextures[0].size);
-      gl.clearColor(0.1, 0.2, 0.3, 1);
-      gl.clear(gl.COLOR_BUFFER_BIT);
-    }
-    runReductionPass(sourceLevel, targetLevel) {
-      const gl = this.gl;
-      gl.useProgram(this.programs.reduction);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, this.levelFramebuffers[targetLevel]);
-      gl.viewport(0, 0, this.levelTextures[targetLevel].size, this.levelTextures[targetLevel].size);
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, this.levelTextures[sourceLevel].texture);
-      const u_previousLevel = gl.getUniformLocation(this.programs.reduction, "u_previousLevel");
-      gl.uniform1i(u_previousLevel, 0);
-      gl.bindVertexArray(this.quadVAO);
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-      gl.bindVertexArray(null);
-    }
-    renderToThreeJS() {
-      if (!this.renderer || !this.scene) return;
-      const camera2 = this.getCameraFromScene();
-      if (!camera2) {
-        console.warn("Plan M: No camera found for rendering");
+      aggregateParticlesIntoL0(this);
+      if (this._quadtreeDisabled) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         return;
       }
-      const gl = this.gl;
-      const oldViewport = gl.getParameter(gl.VIEWPORT);
-      const oldProgram = gl.getParameter(gl.CURRENT_PROGRAM);
-      const oldFramebuffer = gl.getParameter(gl.FRAMEBUFFER_BINDING);
-      try {
-        gl.useProgram(this.programs.render);
-        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-        gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
-        gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, this.positionTextures.getCurrentTexture());
-        const u_positions = gl.getUniformLocation(this.programs.render, "u_positions");
-        const u_texSize = gl.getUniformLocation(this.programs.render, "u_texSize");
-        const u_projectionView = gl.getUniformLocation(this.programs.render, "u_projectionView");
-        const u_pointSize = gl.getUniformLocation(this.programs.render, "u_pointSize");
-        gl.uniform1i(u_positions, 0);
-        gl.uniform2f(u_texSize, this.textureWidth, this.textureHeight);
-        gl.uniform1f(u_pointSize, this.options.pointSize * 10);
-        camera2.updateMatrixWorld();
-        camera2.updateProjectionMatrix();
-        const projectionMatrix = camera2.projectionMatrix;
-        const viewMatrix = camera2.matrixWorldInverse;
-        const projectionView = projectionMatrix.clone().multiply(viewMatrix);
-        gl.uniformMatrix4fv(u_projectionView, false, projectionView.elements);
-        gl.enable(gl.BLEND);
-        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-        gl.enable(gl.DEPTH_TEST);
-        gl.bindVertexArray(this.particleVAO);
-        gl.drawArrays(gl.POINTS, 0, this.options.particleCount);
-        gl.bindVertexArray(null);
-        gl.disable(gl.BLEND);
-        gl.disable(gl.DEPTH_TEST);
-        if (this.frameCount < 3) {
-          console.log(`Plan M: Rendered ${this.options.particleCount} particles at frame ${this.frameCount}`);
-          console.log(`Plan M: Camera position:`, camera2.position);
-          console.log(`Plan M: Point size:`, this.options.pointSize * 10);
-        }
-      } catch (error) {
-        console.error("Plan M render error:", error);
-      } finally {
-        gl.viewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
-        gl.useProgram(oldProgram);
-        gl.bindFramebuffer(gl.FRAMEBUFFER, oldFramebuffer);
+      for (let level = 0; level < this.numLevels - 1; level++) {
+        runReductionPass(this, level, level + 1);
       }
+    }
+    clearForceTexture() {
+      const gl = this.gl;
+      this.unbindAllTextures();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.forceTexture.framebuffer);
+      gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+      gl.viewport(0, 0, this.textureWidth, this.textureHeight);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     }
     getCameraFromScene() {
       if (!this.scene) return null;
@@ -28005,10 +28839,11 @@ ${source}`);
           camera2 = child;
         }
       });
-      if (!camera2 && this.renderer && this.renderer.domElement && this.renderer.domElement.parentElement) {
-        if (window.camera && window.camera.isCamera) {
-          camera2 = window.camera;
+      if (!camera2 && window.camera && window.camera.isCamera) {
+        camera2 = window.camera;
+        if (!this._cameraInfoLogged) {
           console.log("Plan M: Found global camera");
+          this._cameraInfoLogged = true;
         }
       }
       if (!camera2) {
@@ -28017,9 +28852,15 @@ ${source}`);
         camera2.lookAt(0, 0, 0);
         camera2.updateMatrixWorld();
         camera2.updateProjectionMatrix();
-        console.log("Plan M: Using fallback camera");
+        if (!this._cameraInfoLogged) {
+          console.log("Plan M: Using fallback camera");
+          this._cameraInfoLogged = true;
+        }
       } else {
-        console.log("Plan M: Found camera in scene:", camera2.constructor.name);
+        if (!this._cameraInfoLogged) {
+          console.log("Plan M: Found camera in scene:", camera2.constructor.name);
+          this._cameraInfoLogged = true;
+        }
       }
       return camera2;
     }
@@ -28083,6 +28924,14 @@ ${source}`);
         this.positionTextures.textures.forEach((tex) => gl.deleteTexture(tex));
         this.positionTextures.framebuffers.forEach((fbo) => gl.deleteFramebuffer(fbo));
       }
+      if (this.velocityTextures) {
+        this.velocityTextures.textures.forEach((tex) => gl.deleteTexture(tex));
+        this.velocityTextures.framebuffers.forEach((fbo) => gl.deleteFramebuffer(fbo));
+      }
+      if (this.forceTexture) {
+        gl.deleteTexture(this.forceTexture.texture);
+        gl.deleteFramebuffer(this.forceTexture.framebuffer);
+      }
       Object.values(this.programs).forEach((program) => gl.deleteProgram(program));
       if (this.quadVAO) gl.deleteVertexArray(this.quadVAO);
       if (this.particleVAO) gl.deleteVertexArray(this.particleVAO);
@@ -28135,12 +28984,26 @@ ${source}`);
     if (e.key === "2") switchPlan("c");
     if (e.key === "3") switchPlan("d");
     if (e.key === "4") switchPlan("m");
+    if (activePlan === plans.m) {
+      if (e.key === "+" || e.key === "=") {
+        activePlan.options.dt *= 2;
+        console.log(`Plan M speed up: dt = ${activePlan.options.dt.toFixed(4)}`);
+      }
+      if (e.key === "-" || e.key === "_") {
+        activePlan.options.dt /= 2;
+        console.log(`Plan M slow down: dt = ${activePlan.options.dt.toFixed(4)}`);
+      }
+      if (e.key === "0") {
+        activePlan.options.dt = 1 / 60;
+        console.log(`Plan M speed reset: dt = ${activePlan.options.dt.toFixed(4)}`);
+      }
+    }
   });
   function animate() {
     requestAnimationFrame(animate);
     controls.update();
-    if (activePlan && activePlan.update) activePlan.update();
     renderer.render(scene, camera);
+    if (activePlan && activePlan.update) activePlan.update();
   }
   window.addEventListener("resize", () => {
     camera.aspect = window.innerWidth / window.innerHeight;

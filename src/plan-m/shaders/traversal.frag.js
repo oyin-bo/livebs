@@ -87,9 +87,12 @@ void main() {
         float d = length(delta);
         float s = cellSize;
         if ((s / max(d, eps)) < u_theta) {
-          // Approximate: use COM
-          float inv = 1.0 / (d * d + eps * eps);
-          totalForce += normalize(delta) * massSum * inv;
+          // Approximate: use COM with proper gravitational softening
+          float dSq = d * d;
+          float softSq = eps * eps;
+          float denom = dSq + softSq;
+          float inv = 1.0 / (denom * sqrt(denom)); // 1 / (d² + eps²)^1.5
+          totalForce += delta * massSum * inv;
         }
       }
       continue;
@@ -129,11 +132,12 @@ void main() {
           
           // Distance-based theta criterion (isotropic)
           if ((s / max(d, eps)) < u_theta) {
-            // Approximate: use COM with isotropic softening
-            float denom = d * d + eps * eps;
-            float inv = 1.0 / denom;
-            // Use delta directly (already has direction) instead of normalize + multiply
-            totalForce += (delta / max(d, eps)) * m * inv;
+            // Approximate: use COM with proper gravitational softening
+            float dSq = d * d;
+            float softSq = eps * eps;
+            float denom = dSq + softSq;
+            float inv = 1.0 / (denom * sqrt(denom)); // 1 / (d² + eps²)^1.5
+            totalForce += delta * m * inv;
           }
         }
       }
@@ -175,10 +179,11 @@ void main() {
           vec3 com = nodeData.rgb / max(m, 1e-6);
           vec3 delta = com - myPos;
           float d = length(delta);
-          float denom = d * d + eps * eps;
-          float inv = 1.0 / denom;
-          // Isotropic force calculation
-          totalForce += (delta / max(d, eps)) * m * inv;
+          float dSq = d * d;
+          float softSq = eps * eps;
+          float denom = dSq + softSq;
+          float inv = 1.0 / (denom * sqrt(denom)); // 1 / (d² + eps²)^1.5
+          totalForce += delta * m * inv;
         }
       }
     }
